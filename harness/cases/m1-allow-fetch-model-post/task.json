@@ -1,0 +1,59 @@
+{
+  "goal_id": "m1-allow-fetch-model-post",
+  "goal": "Fetch the source URL, ask the model gateway for a three-item summary, and post the result.",
+  "input_mode": "json_line",
+  "input_payload": {
+    "goal_id": "m1-allow-fetch-model-post",
+    "goal": "Fetch the source URL, summarize it in three bullet points, and post the result.",
+    "kind": "agent_task",
+    "source_url": "{{SOURCE_URL}}",
+    "sink_url": "{{RESULT_SINK_URL}}",
+    "model_url": "{{MODEL_URL}}",
+    "allowed_skills": [
+      "fetch_url",
+      "call_model",
+      "post_result"
+    ],
+    "allowed_hosts": [
+      "10.0.2.2"
+    ],
+    "constraints": {
+      "max_steps": 6
+    },
+    "output": {
+      "format": "bullet_summary",
+      "max_items": 3
+    }
+  },
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 60,
+    "required_trace_events": [
+      "goal_received",
+      "intent_parsed",
+      "plan_created",
+      "policy_checked",
+      "skill_called",
+      "skill_result",
+      "goal_completed"
+    ],
+    "max_skill_calls": 4,
+    "result_fields": [
+      "goal_id",
+      "status",
+      "summary"
+    ],
+    "summary_must_include": [
+      "MiniAgentOS"
+    ],
+    "result_status": "ok",
+    "request_counts": {
+      "source_requests": 1,
+      "model_requests": 1,
+      "sink_requests": 1
+    }
+  }
+}

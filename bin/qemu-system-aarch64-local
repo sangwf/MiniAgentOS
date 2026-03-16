@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+QEMU_ROOT="${MINIAGENTOS_QEMU_ROOT:-$HOME/.miniagentos/qemu-bottle/qemu/10.2.1}"
+DEPS_ROOT="${MINIAGENTOS_QEMU_DEPS_ROOT:-$HOME/.miniagentos/qemu-deps}"
+
+if [ ! -x "$QEMU_ROOT/bin/qemu-system-aarch64" ]; then
+    "$ROOT_DIR/bin/setup-qemu-local"
+fi
+
+join_paths() {
+    awk 'NF { printf "%s:", $0 }'
+}
+
+DYLD_PREFIXES=$(
+    {
+        find "$DEPS_ROOT" -maxdepth 3 -type d -name lib 2>/dev/null | sort
+        find -L "$HOME/homebrew/opt" -maxdepth 2 -type d -name lib 2>/dev/null | sort
+        find -L /opt/homebrew/opt -maxdepth 2 -type d -name lib 2>/dev/null | sort
+    } | join_paths
+)
+
+if [ -n "${DYLD_LIBRARY_PATH:-}" ]; then
+    DYLD_LIBRARY_PATH="${DYLD_PREFIXES}${DYLD_LIBRARY_PATH}"
+else
+    DYLD_LIBRARY_PATH="${DYLD_PREFIXES}"
+fi
+export DYLD_LIBRARY_PATH
+
+exec "$QEMU_ROOT/bin/qemu-system-aarch64" -L "$QEMU_ROOT/share/qemu" "$@"

@@ -1,0 +1,37 @@
+{
+  "goal_id": "m2-nl-fetch-model-post",
+  "goal": "Accept a plain-text goal, compile it locally, and complete the fetch-model-post loop.",
+  "input_mode": "text_line",
+  "input_payload": "Fetch {{SOURCE_URL}}, summarize it in three bullet points using the model gateway at {{MODEL_URL}}, and post the result to {{RESULT_SINK_URL}}.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 75,
+    "required_trace_events": [
+      "goal_received",
+      "goal_text_received",
+      "goal_compilation_started",
+      "goal_compiled",
+      "plan_created",
+      "policy_checked",
+      "skill_called",
+      "skill_result",
+      "goal_completed"
+    ],
+    "max_skill_calls": 4,
+    "result_fields": [
+      "goal_id",
+      "status",
+      "summary"
+    ],
+    "result_status": "ok",
+    "request_counts": {
+      "translation_requests": 0,
+      "source_requests": 1,
+      "model_requests": 1,
+      "sink_requests": 1
+    }
+  }
+}

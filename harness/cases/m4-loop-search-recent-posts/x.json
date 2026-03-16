@@ -1,0 +1,16 @@
+{
+  "search": {
+    "ai agents": [
+      {
+        "id": "post-1",
+        "author": "karpathy",
+        "text": "Agents are finally starting to feel practical when the tool loop stays small and honest."
+      },
+      {
+        "id": "post-2",
+        "author": "swyx",
+        "text": "Tool use gets much more reliable once the agent can hold onto a little session state."
+      }
+    ]
+  }
+}

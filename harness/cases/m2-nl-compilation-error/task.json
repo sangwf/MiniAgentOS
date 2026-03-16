@@ -1,0 +1,37 @@
+{
+  "goal_id": "m2-nl-compilation-error",
+  "goal": "Surface a structured compilation failure when the local goal compiler rejects the input.",
+  "input_mode": "text_line",
+  "input_payload": "Fetch {{SOURCE_URL}}, summarize it in three bullet points, and post the result to {{RESULT_SINK_URL}} with compilation error.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 75,
+    "required_trace_events": [
+      "goal_received",
+      "goal_text_received",
+      "goal_compilation_started",
+      "goal_compilation_failed",
+      "goal_failed"
+    ],
+    "max_skill_calls": 1,
+    "result_fields": [
+      "goal_id",
+      "status",
+      "reason"
+    ],
+    "summary_required": false,
+    "reason_must_include": [
+      "compilation"
+    ],
+    "result_status": "error",
+    "request_counts": {
+      "translation_requests": 0,
+      "source_requests": 0,
+      "model_requests": 0,
+      "sink_requests": 1
+    }
+  }
+}

@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+
+def emit(event, **extra):
+    payload = {"event": event, "ts_ms": int(time.time() * 1000)}
+    payload.update(extra)
+    sys.stdout.write("TRACE " + json.dumps(payload, ensure_ascii=True) + "\n")
+    sys.stdout.flush()
+
+
+def summarize_text(text: str, sentence_limit: int) -> str:
+    normalized = " ".join(text.replace("\n", " ").split())
+    sentences = []
+    for chunk in normalized.split("."):
+        chunk = chunk.strip()
+        if chunk:
+            sentences.append(chunk + ".")
+        if len(sentences) >= sentence_limit:
+            break
+    return " ".join(sentences)
+
+
+def fetch_text(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=10) as response:
+        return response.read().decode("utf-8")
+
+
+def fetch_json(url: str) -> dict:
+    with urllib.request.urlopen(url, timeout=10) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def post_json(url: str, payload: dict) -> dict:
+    body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        body = response.read().decode("utf-8")
+        if not body.strip():
+            return {}
+        return json.loads(body)
+
+
+def print_prompt(prompt: str):
+    sys.stdout.write(prompt + "\n")
+    sys.stdout.flush()
+
+
+def print_reason(prompt: str, reason: str):
+    sys.stdout.write("\nreason: " + reason + "\n")
+    sys.stdout.flush()
+    print_prompt(prompt)
+
+
+def print_summary(prompt: str, lines: list[str]):
+    sys.stdout.write("\n--- summary ---\n")
+    for line in lines:
+        sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+    print_prompt(prompt)
+
+
+def handle_legacy_task(task: dict):
+    goal_id = task["goal_id"]
+    source_url = task["source_url"]
+    sink_url = task["sink_url"]
+    sentence_limit = int(task.get("summary_sentences", 3))
+
+    emit("goal_received", step=0, detail={"goal_id": goal_id})
+    emit("intent_parsed", step=0, detail={"kind": task.get("kind")})
+    emit(
+        "plan_created",
+        step=0,
+        detail={
+            "skills": ["fetch_url", "summarize_text", "post_result"],
+            "max_steps": task.get("constraints", {}).get("max_steps"),
+        },
+    )
+
+    emit("skill_called", step=1, skill="fetch_url", detail={"url": source_url})
+    source_text = fetch_text(source_url)
+    emit("skill_result", step=1, skill="fetch_url", status="ok")
+
+    emit("skill_called", step=2, skill="summarize_text")
+    summary = summarize_text(source_text, sentence_limit)
+    emit("skill_result", step=2, skill="summarize_text", status="ok")
+
+    emit("skill_called", step=3, skill="post_result", detail={"url": sink_url})
+    result = {
+        "goal_id": goal_id,
+        "status": "ok",
+        "summary": summary,
+    }
+    post_json(sink_url, result)
+    emit("skill_result", step=3, skill="post_result", status="ok")
+
+    emit("goal_completed", step=3, status="ok")
+    sys.stdout.write("done\n")
+    sys.stdout.flush()
+
+
+def extract_url(text: str) -> str | None:
+    match = re.search(r"https?://\S+", text)
+    if not match:
+        return None
+    return match.group(0).rstrip(".,;)")
+
+
+def extract_username(text: str) -> str | None:
+    lowered = text.lower()
+    match = re.search(r"what did ([a-z0-9_]+) post recently", lowered)
+    if match:
+        return match.group(1)
+    match = re.search(r"get recent posts from ([a-z0-9_]+)", lowered)
+    if match:
+        return match.group(1)
+    return None
+
+
+def extract_query(text: str) -> str:
+    lowered = text.lower()
+    for marker in ("about ", "for ", ": "):
+        index = lowered.find(marker)
+        if index != -1:
+            return text[index + len(marker) :].strip().rstrip(".")
+    return text.strip().rstrip(".")
+
+
+def extract_post_request(text: str) -> tuple[str, dict] | None:
+    match = re.search(r"post\s+(?P<body>\{.*?\})\s+to\s+(?P<url>https?://\S+)", text, re.I)
+    if not match:
+        return None
+    url = match.group("url").rstrip(".,;)")
+    try:
+        body = json.loads(match.group("body"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    return url, body
+
+
+def render_post_lines(posts: list[dict]) -> list[str]:
+    lines = []
+    for post in posts[:3]:
+        author = post.get("author", "unknown")
+        lines.append(f"- @{author}: {post.get('text', '')}")
+    return lines or ["- No posts found."]
+
+
+def tool_call(tool: str, arguments: dict, result: dict | None = None, status: str = "ok"):
+    emit("tool_call_requested", tool=tool, arguments=arguments)
+    emit("tool_call_started", tool=tool, arguments=arguments)
+    payload = {"status": status}
+    if result is not None:
+        payload["result"] = result
+    emit("tool_call_completed", tool=tool, arguments=arguments, status=status, result=result or {})
+    return payload
+
+
+def handle_text_turn(prompt: str, text: str, session_state: dict):
+    lowered = text.lower().strip()
+
+    emit("user_turn_received")
+    emit("model_turn_started")
+
+    if "forbidden tool" in lowered or "admin tool" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        emit(
+            "tool_call_requested",
+            tool="admin_reset",
+            arguments={"scope": "system"},
+        )
+        emit(
+            "tool_call_denied",
+            tool="admin_reset",
+            arguments={"scope": "system"},
+            reason="tool policy denied",
+        )
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="policy_denied")
+        print_reason(prompt, "tool policy denied")
+        return
+
+    if "keep looping" in lowered or "loop budget" in lowered:
+        step = 0
+        emit("model_turn_completed", stop_reason="tool_call", step=step)
+        while step < 5:
+            key = f"loop_step_{step}"
+            tool_call("read_session_state", {"key": key}, {"value": ""})
+            if step < 4:
+                step += 1
+                emit("model_turn_started", step=step)
+                emit("model_turn_completed", stop_reason="tool_call", step=step)
+            else:
+                break
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="budget_exceeded")
+        print_reason(prompt, "m4 loop budget exceeded")
+        return
+
+    post_request = extract_post_request(text)
+    if post_request:
+        url, payload = post_request
+        emit("model_turn_completed", stop_reason="tool_call")
+        response = post_json(url, payload)
+        tool_call(
+            "post_url",
+            {
+                "url": url,
+                "json": json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
+            },
+            response,
+        )
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, ["- Posted JSON to the requested endpoint."])
+        return
+
+    if lowered.startswith("post a tweet:") or lowered.startswith("tweet "):
+        tweet_text = text.split(":", 1)[-1].strip() if ":" in text else text[6:].strip()
+        emit("model_turn_completed", stop_reason="tool_call")
+        response = post_json(
+            os.environ["HARNESS_X_POST_TWEET_URL"],
+            {"text": tweet_text},
+        )
+        tool_call("post_tweet", {"text": tweet_text}, response)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- Posted tweet {response.get('tweet_id', 'unknown')}."])
+        return
+
+    if "search recent posts" in lowered or "search x" in lowered:
+        query = extract_query(text)
+        emit("model_turn_completed", stop_reason="tool_call")
+        search_url = os.environ["HARNESS_X_SEARCH_RECENT_URL"] + "?" + urllib.parse.urlencode(
+            {"query": query}
+        )
+        payload = fetch_json(search_url)
+        tool_call("search_recent_posts", {"query": query}, payload)
+        session_state["last_posts"] = payload.get("posts", [])
+        tool_call(
+            "write_session_state",
+            {"key": "last_posts"},
+            {"stored": True, "count": len(session_state["last_posts"])},
+        )
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, render_post_lines(session_state["last_posts"]))
+        return
+
+    username = extract_username(text)
+    if username:
+        emit("model_turn_completed", stop_reason="tool_call")
+        user_url = os.environ["HARNESS_X_USER_POSTS_URL"].rstrip("/") + "/" + username
+        payload = fetch_json(user_url)
+        tool_call("get_user_posts", {"username": username}, payload)
+        session_state["last_posts"] = payload.get("posts", [])
+        tool_call(
+            "write_session_state",
+            {"key": "last_posts"},
+            {"stored": True, "count": len(session_state["last_posts"])},
+        )
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, render_post_lines(session_state["last_posts"]))
+        return
+
+    if "first post" in lowered or "that search" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        tool_call(
+            "read_session_state",
+            {"key": "last_posts"},
+            {"value": session_state.get("last_posts", [])},
+        )
+        posts = session_state.get("last_posts", [])
+        if posts:
+            answer = [f"- The first post says: {posts[0].get('text', '')}"]
+        else:
+            answer = ["- No cached posts are available in this session."]
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, answer)
+        return
+
+    if extract_url(text):
+        emit("model_turn_completed", stop_reason="tool_call")
+        source_url = extract_url(text)
+        payload = {"url": source_url}
+        tool_call("fetch_url", payload, {"ok": True})
+        source_text = fetch_text(source_url)
+        session_state["last_fetch"] = {"url": source_url, "text": source_text}
+        tool_call(
+            "write_session_state",
+            {"key": "last_fetch"},
+            {"stored": True, "url": source_url},
+        )
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, render_post_lines([{"author": "web", "text": summarize_text(source_text, 2)}]))
+        return
+
+    emit("model_turn_completed", stop_reason="unsupported")
+    emit("assistant_response_rendered")
+    emit("loop_stopped", stop_reason="unsupported")
+    print_reason(prompt, "unsupported goal")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prompt", default="Goal >")
+    args = parser.parse_args()
+
+    emit("session_started")
+    sys.stdout.write("MiniAgentOS fixture\n")
+    print_prompt(args.prompt)
+
+    session_state: dict[str, object] = {}
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            return 0
+        command = line.strip()
+        if not command:
+            print_prompt(args.prompt)
+            continue
+        if command in {
+            "status plain",
+            "status inline",
+            "trace on",
+            "trace off",
+            "debug on",
+            "debug off",
+        }:
+            print_prompt(args.prompt)
+            continue
+        if command in {"status status", "trace status", "debug status", "openai-status"}:
+            sys.stdout.write("ok\n")
+            sys.stdout.flush()
+            print_prompt(args.prompt)
+            continue
+        if command.startswith("openai-key "):
+            sys.stdout.write("openai key stored\n")
+            sys.stdout.flush()
+            print_prompt(args.prompt)
+            continue
+        if command == "openai-clear":
+            sys.stdout.write("openai key cleared\n")
+            sys.stdout.flush()
+            print_prompt(args.prompt)
+            continue
+
+        try:
+            payload = json.loads(command)
+        except json.JSONDecodeError:
+            payload = None
+
+        if isinstance(payload, dict) and "goal_id" in payload:
+            handle_legacy_task(payload)
+            print_prompt(args.prompt)
+            continue
+
+        handle_text_turn(args.prompt, command, session_state)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

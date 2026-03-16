@@ -1,0 +1,38 @@
+{
+  "goal_id": "m4-loop-context-bleed-repro",
+  "goal": "Reproduce a context-bleed scenario across multiple M4 turns.",
+  "turns": [
+    {
+      "input_mode": "text_line",
+      "input_payload": "Andrej Karpathy's new opinions in twitter."
+    },
+    {
+      "input_mode": "text_line",
+      "input_payload": "yes, 500 words."
+    },
+    {
+      "input_mode": "text_line",
+      "input_payload": "刘德华多大了？"
+    },
+    {
+      "input_mode": "text_line",
+      "input_payload": "你都有什么工具可被调用？"
+    }
+  ],
+  "fixture": {
+    "source_asset": "source.md",
+    "x_asset": "x.json"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 90,
+    "session_transcript_required": true,
+    "expected_turn_count": 4,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok"
+  }
+}

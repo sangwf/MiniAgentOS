@@ -1,0 +1,60 @@
+{
+  "goal_id": "m1-deny-disallowed-skill",
+  "goal": "Refuse the model step when the task allowlist omits call_model.",
+  "input_mode": "json_line",
+  "input_payload": {
+    "goal_id": "m1-deny-disallowed-skill",
+    "goal": "Fetch the source URL, summarize it, and post the result.",
+    "kind": "agent_task",
+    "source_url": "{{SOURCE_URL}}",
+    "sink_url": "{{RESULT_SINK_URL}}",
+    "model_url": "{{MODEL_URL}}",
+    "allowed_skills": [
+      "fetch_url",
+      "post_result"
+    ],
+    "allowed_hosts": [
+      "10.0.2.2"
+    ],
+    "constraints": {
+      "max_steps": 6
+    },
+    "output": {
+      "format": "bullet_summary",
+      "max_items": 3
+    }
+  },
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 60,
+    "required_trace_events": [
+      "goal_received",
+      "intent_parsed",
+      "plan_created",
+      "policy_checked",
+      "skill_called",
+      "skill_result",
+      "skill_denied",
+      "goal_refused"
+    ],
+    "max_skill_calls": 2,
+    "result_fields": [
+      "goal_id",
+      "status",
+      "reason"
+    ],
+    "summary_required": false,
+    "reason_must_include": [
+      "skill"
+    ],
+    "result_status": "refused",
+    "request_counts": {
+      "source_requests": 1,
+      "model_requests": 0,
+      "sink_requests": 1
+    }
+  }
+}

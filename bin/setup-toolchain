@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+BREW_PREFIX="${BOOTSTRAP_BREW_PREFIX:-}"
+if [ -z "$BREW_PREFIX" ]; then
+    if [ -x /opt/homebrew/bin/brew ]; then
+        BREW_PREFIX=/opt/homebrew
+    else
+        BREW_PREFIX="$HOME/homebrew"
+    fi
+fi
+
+ensure_clt() {
+    if [ "$(uname -s)" != "Darwin" ]; then
+        return
+    fi
+    if ! command -v softwareupdate >/dev/null 2>&1; then
+        return
+    fi
+
+    label=$(
+        softwareupdate --list 2>/dev/null \
+        | sed -n 's/^\* Label: \(Command Line Tools for Xcode .*\)$/\1/p' \
+        | head -n 1
+    )
+    if [ -n "$label" ]; then
+        softwareupdate --install "$label"
+    fi
+}
+
+ensure_homebrew() {
+    if [ -x /opt/homebrew/bin/brew ]; then
+        BREW_PREFIX=/opt/homebrew
+    fi
+    if [ ! -x "$BREW_PREFIX/bin/brew" ]; then
+        mkdir -p "$BREW_PREFIX"
+        curl -fsSL https://github.com/Homebrew/brew/tarball/main \
+            | tar xz --strip-components 1 -C "$BREW_PREFIX"
+    fi
+    PATH="$BREW_PREFIX/bin:$PATH"
+    export PATH
+}
+
+ensure_rust() {
+    if [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+        tmp_script=$(mktemp /tmp/rustup-init.XXXXXX.sh)
+        curl -fsSL https://sh.rustup.rs -o "$tmp_script"
+        sh "$tmp_script" -y --profile minimal --default-toolchain nightly
+        rm -f "$tmp_script"
+    fi
+    PATH="$HOME/.cargo/bin:$PATH"
+    export PATH
+    rustup toolchain install nightly --profile minimal
+    rustup component add rust-src --toolchain nightly
+}
+
+ensure_qemu() {
+    if command -v qemu-system-aarch64 >/dev/null 2>&1; then
+        return
+    fi
+    if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install --force-bottle qemu; then
+        "$(CDPATH= cd -- "$(dirname "$0")" && pwd)/setup-qemu-local"
+    fi
+}
+
+ensure_clt
+ensure_homebrew
+ensure_rust
+ensure_qemu
+
+echo "toolchain ready"
+echo "export PATH=\"$BREW_PREFIX/bin:$HOME/.cargo/bin:\$PATH\""

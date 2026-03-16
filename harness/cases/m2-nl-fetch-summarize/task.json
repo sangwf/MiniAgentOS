@@ -1,0 +1,39 @@
+{
+  "goal_id": "m2-nl-fetch-summarize",
+  "goal": "Accept a plain-text goal, fetch one source URL, and print a local summary without requiring model or sink services.",
+  "input_mode": "text_line",
+  "input_payload": "Fetch {{SOURCE_URL}} and summarize it in three bullet points.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 75,
+    "required_trace_events": [
+      "goal_received",
+      "goal_text_received",
+      "goal_compilation_started",
+      "goal_compiled",
+      "plan_created",
+      "policy_checked",
+      "skill_called",
+      "skill_result",
+      "policy_checked",
+      "skill_called",
+      "skill_result",
+      "goal_completed"
+    ],
+    "max_skill_calls": 2,
+    "result_required": false,
+    "uart_must_include": [
+      "--- summary ---",
+      "MiniAgentOS M2 turns Goal >"
+    ],
+    "request_counts": {
+      "translation_requests": 0,
+      "source_requests": 1,
+      "model_requests": 0,
+      "sink_requests": 0
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "goal_id": "m4-loop-openai-followup",
+  "goal": "Exercise two consecutive OpenAI-only user turns in one M4 session.",
+  "turns": [
+    {
+      "input_mode": "text_line",
+      "input_payload": "hello"
+    },
+    {
+      "input_mode": "text_line",
+      "input_payload": "who are you?"
+    }
+  ],
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 45,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_request_built",
+      "model_turn_started",
+      "model_turn_completed",
+      "assistant_response_rendered",
+      "loop_stopped"
+    ],
+    "session_transcript_required": true,
+    "expected_turn_count": 2,
+    "max_tool_calls": 0,
+    "result_required": false,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "MiniAgentOS M4"
+    ]
+  }
+}

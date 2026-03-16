@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://minios.local/schemas/intent-ir.schema.json",
+  "title": "MiniAgentOS Intent IR",
+  "type": "object",
+  "required": [
+    "interaction_kind",
+    "action",
+    "max_items",
+    "requires_clarification"
+  ],
+  "properties": {
+    "interaction_kind": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_url": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sink_url": {
+      "type": "string",
+      "minLength": 1
+    },
+    "max_items": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "output_language": {
+      "type": "string",
+      "minLength": 1
+    },
+    "style": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requires_clarification": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": true
+}

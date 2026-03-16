@@ -1,0 +1,39 @@
+{
+  "goal_id": "m3-nl-chat-refusal",
+  "goal": "Run a chat-like natural-language input through the guest agent core and refuse it cleanly as unsupported.",
+  "requires_guest_openai": true,
+  "input_mode": "text_line",
+  "input_payload": "how old are you?",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 90,
+    "required_trace_events": [
+      "goal_received",
+      "goal_text_received",
+      "agent_loop_started",
+      "model_interpretation_started",
+      "goal_refused"
+    ],
+    "result_required": false,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "reason"
+    ],
+    "terminal_status": "refused",
+    "terminal_reason_required": true,
+    "terminal_reason_must_include": [
+      "unsupported goal"
+    ],
+    "intent_absent": true,
+    "request_counts": {
+      "source_requests": 0,
+      "sink_requests": 0,
+      "interpretation_requests": 0,
+      "model_requests": 0
+    }
+  }
+}

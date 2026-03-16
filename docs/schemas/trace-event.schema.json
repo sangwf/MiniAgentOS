@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://minios.local/schemas/trace-event.schema.json",
+  "title": "MiniAgentOS Trace Event",
+  "type": "object",
+  "required": [
+    "event",
+    "ts_ms"
+  ],
+  "properties": {
+    "event": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ts_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "step": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "skill": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string"
+    },
+    "tool": {
+      "type": "string"
+    },
+    "phase": {
+      "type": "string"
+    },
+    "retry": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "proxy": {
+      "type": "boolean"
+    },
+    "cache": {
+      "type": "string"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "arguments": {
+      "type": "object"
+    },
+    "result": {
+      "type": "object"
+    },
+    "interaction_kind": {
+      "type": "string"
+    },
+    "stop_reason": {
+      "type": "string"
+    },
+    "source_url": {
+      "type": "string"
+    },
+    "sink_url": {
+      "type": "string"
+    },
+    "max_items": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "requires_clarification": {
+      "type": "boolean"
+    },
+    "status": {
+      "type": "string"
+    },
+    "detail": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

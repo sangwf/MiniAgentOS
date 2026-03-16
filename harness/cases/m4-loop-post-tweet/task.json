@@ -1,0 +1,51 @@
+{
+  "goal_id": "m4-loop-post-tweet",
+  "goal": "Exercise the M4 loop with one post_tweet tool call and a terminal-facing reply.",
+  "input_mode": "text_line",
+  "input_payload": "Post a tweet: MiniAgentOS now has an honest tool loop.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 30,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "model_turn_completed",
+      "tool_call_requested",
+      "tool_call_started",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped"
+    ],
+    "session_transcript_required": true,
+    "expected_turn_count": 1,
+    "max_tool_calls": 1,
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "post_tweet",
+        "arguments": {
+          "text": "MiniAgentOS now has an honest tool loop."
+        }
+      }
+    ],
+    "result_required": false,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "Posted tweet"
+    ],
+    "request_counts": {
+      "x_post_requests": 1,
+      "x_search_requests": 0,
+      "x_user_posts_requests": 0
+    }
+  }
+}

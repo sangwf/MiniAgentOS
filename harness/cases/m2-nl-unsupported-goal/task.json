@@ -1,0 +1,31 @@
+{
+  "goal_id": "m2-nl-unsupported-goal",
+  "goal": "Refuse an unsupported fetch-style M2 goal without falling back to unknown command.",
+  "input_mode": "text_line",
+  "input_payload": "Fetch a joke about kernel networking and summarize it in three bullet points.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 75,
+    "required_trace_events": [
+      "goal_received",
+      "goal_text_received",
+      "goal_compilation_started",
+      "goal_compilation_failed",
+      "goal_refused"
+    ],
+    "max_skill_calls": 1,
+    "result_required": false,
+    "uart_must_include": [
+      "unsupported goal"
+    ],
+    "request_counts": {
+      "translation_requests": 0,
+      "source_requests": 0,
+      "model_requests": 0,
+      "sink_requests": 0
+    }
+  }
+}

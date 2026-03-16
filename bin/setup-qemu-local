@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+QEMU_HOME="${MINIAGENTOS_QEMU_HOME:-$HOME/.miniagentos}"
+QEMU_ROOT="$QEMU_HOME/qemu-bottle"
+DEPS_ROOT="$QEMU_HOME/qemu-deps"
+CACHE_ROOT="$HOME/Library/Caches/Homebrew/downloads"
+
+mkdir -p "$QEMU_ROOT" "$DEPS_ROOT"
+
+export PATH="$HOME/homebrew/bin:/opt/homebrew/bin:$PATH"
+
+brew fetch --force-bottle \
+    qemu \
+    gnutls \
+    ncurses \
+    vde \
+    pixman \
+    jpeg-turbo \
+    libpng \
+    libslirp \
+    libssh \
+    libusb \
+    lzo \
+    snappy
+
+extract_one() {
+    pattern=$1
+    destination=$2
+    archive=$(find "$CACHE_ROOT" -maxdepth 1 -type f -iname "$pattern" | head -n 1)
+    if [ -z "$archive" ]; then
+        echo "missing bottle for pattern: $pattern" >&2
+        exit 1
+    fi
+    tar xzf "$archive" -C "$destination"
+}
+
+extract_one '*--qemu--*.tar.gz' "$QEMU_ROOT"
+extract_one '*--gnutls--*.tar.gz' "$DEPS_ROOT"
+extract_one '*--ncurses--*.tar.gz' "$DEPS_ROOT"
+extract_one '*--vde--*.tar.gz' "$DEPS_ROOT"
+extract_one '*--pixman--*.tar.gz' "$DEPS_ROOT"
+extract_one '*--jpeg-turbo--*.tar.gz' "$DEPS_ROOT"
+extract_one '*--libpng--*.tar.gz' "$DEPS_ROOT"
+extract_one '*--libslirp--*.tar.gz' "$DEPS_ROOT"
+extract_one '*--libssh--*.tar.gz' "$DEPS_ROOT"
+extract_one '*--libusb--*.tar.gz' "$DEPS_ROOT"
+extract_one '*--lzo--*.tar.gz' "$DEPS_ROOT"
+extract_one '*--snappy--*.tar.gz' "$DEPS_ROOT"
+
+echo "local qemu runtime ready under $QEMU_HOME"

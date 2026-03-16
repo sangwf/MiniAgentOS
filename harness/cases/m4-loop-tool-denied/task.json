@@ -1,0 +1,53 @@
+{
+  "goal_id": "m4-loop-tool-denied",
+  "goal": "Exercise the M4 loop when a requested tool is denied at the tool boundary.",
+  "input_mode": "text_line",
+  "input_payload": "Use the forbidden tool to do an admin tool reset.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 30,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "model_turn_completed",
+      "tool_call_requested",
+      "tool_call_denied",
+      "assistant_response_rendered",
+      "loop_stopped"
+    ],
+    "session_transcript_required": true,
+    "expected_turn_count": 1,
+    "max_tool_calls": 1,
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "admin_reset"
+      },
+      {
+        "event": "tool_call_denied",
+        "tool": "admin_reset",
+        "reason": "tool policy denied"
+      }
+    ],
+    "result_required": false,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "reason"
+    ],
+    "terminal_status": "refused",
+    "terminal_reason_must_include": [
+      "tool policy denied"
+    ],
+    "request_counts": {
+      "sink_requests": 0,
+      "x_post_requests": 0,
+      "x_search_requests": 0,
+      "x_user_posts_requests": 0
+    }
+  }
+}

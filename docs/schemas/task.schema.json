@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://minios.local/schemas/task.schema.json",
+  "title": "MiniAgentOS Harness Task",
+  "type": "object",
+  "required": [
+    "goal_id",
+    "goal",
+    "expect"
+  ],
+  "properties": {
+    "goal_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_mode": {
+      "type": "string",
+      "enum": [
+        "json_line",
+        "text_line"
+      ]
+    },
+    "input_payload": {
+      "oneOf": [
+        {
+          "type": "object"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "turns": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "input_mode",
+          "input_payload"
+        ],
+        "properties": {
+          "input_mode": {
+            "type": "string",
+            "enum": [
+              "json_line",
+              "text_line"
+            ]
+          },
+          "input_payload": {
+            "oneOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "expect": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "properties": {
+        "source_asset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "x_asset": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "expect": {
+      "type": "object",
+      "required": [
+        "boot_prompt",
+        "timeout_sec",
+        "required_trace_events"
+      ],
+      "properties": {
+        "boot_prompt": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_sec": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "required_trace_events": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "max_skill_calls": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expected_turn_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session_transcript_required": {
+          "type": "boolean"
+        },
+        "expected_tool_calls": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "result_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "summary_must_include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "terminal_summary_must_match_regex": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "result_status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "intent_required": {
+          "type": "boolean"
+        },
+        "intent_absent": {
+          "type": "boolean"
+        },
+        "intent_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "expected_intent": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,58 @@
+{
+  "goal_id": "m3-nl-summarize-url",
+  "goal": "Use the model-driven agent core to summarize one URL and return the result directly to UART.",
+  "requires_guest_openai": true,
+  "input_mode": "text_line",
+  "input_payload": "Summarize {{SOURCE_URL}} in three bullet points.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 90,
+    "required_trace_events": [
+      "goal_received",
+      "goal_text_received",
+      "agent_loop_started",
+      "model_interpretation_started",
+      "model_interpretation_result",
+      "intent_compiled",
+      "plan_created",
+      "policy_checked",
+      "skill_called",
+      "skill_result",
+      "goal_completed"
+    ],
+    "result_required": false,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "intent_fields": [
+      "interaction_kind",
+      "action",
+      "source_url",
+      "max_items",
+      "output_language",
+      "style",
+      "requires_clarification"
+    ],
+    "expected_intent": {
+      "interaction_kind": "task",
+      "action": "local_summary",
+      "source_url": "{{SOURCE_URL}}",
+      "max_items": 3,
+      "output_language": "default",
+      "style": "bullet",
+      "requires_clarification": false
+    },
+    "terminal_status": "ok",
+    "terminal_summary_required": true,
+    "request_counts": {
+      "source_requests": 1,
+      "interpretation_requests": 0,
+      "model_requests": 0
+    }
+  }
+}

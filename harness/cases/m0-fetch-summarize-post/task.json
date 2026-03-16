@@ -1,0 +1,41 @@
+{
+  "goal_id": "m0-fetch-summarize-post",
+  "goal": "Fetch the source document, summarize it in three sentences, and POST the result to the sink.",
+  "input_mode": "json_line",
+  "input_payload": {
+    "goal_id": "m0-fetch-summarize-post",
+    "kind": "fetch_summarize_post",
+    "source_url": "{{SOURCE_URL}}",
+    "sink_url": "{{RESULT_SINK_URL}}",
+    "summary_sentences": 3,
+    "constraints": {
+      "max_steps": 5
+    }
+  },
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 45,
+    "required_trace_events": [
+      "goal_received",
+      "intent_parsed",
+      "plan_created",
+      "skill_called",
+      "skill_result",
+      "goal_completed"
+    ],
+    "max_skill_calls": 5,
+    "result_fields": [
+      "goal_id",
+      "status",
+      "summary"
+    ],
+    "summary_must_include": [
+      "MiniAgentOS",
+      "agent-first"
+    ],
+    "result_status": "ok"
+  }
+}

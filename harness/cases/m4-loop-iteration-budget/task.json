@@ -1,0 +1,59 @@
+{
+  "goal_id": "m4-loop-iteration-budget",
+  "goal": "Exercise the M4 loop when repeated tool calls exceed the iteration budget.",
+  "input_mode": "text_line",
+  "input_payload": "Keep looping until the loop budget is hit.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 30,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "model_turn_completed",
+      "tool_call_requested",
+      "tool_call_started",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped"
+    ],
+    "session_transcript_required": true,
+    "expected_turn_count": 1,
+    "max_tool_calls": 5,
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "read_session_state",
+        "arguments": {
+          "key": "loop_step_0"
+        }
+      },
+      {
+        "event": "tool_call_requested",
+        "tool": "read_session_state",
+        "arguments": {
+          "key": "loop_step_4"
+        }
+      }
+    ],
+    "result_required": false,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "reason"
+    ],
+    "terminal_status": "error",
+    "terminal_reason_must_include": [
+      "m4 loop budget exceeded"
+    ],
+    "request_counts": {
+      "sink_requests": 0,
+      "x_post_requests": 0,
+      "x_search_requests": 0,
+      "x_user_posts_requests": 0
+    }
+  }
+}

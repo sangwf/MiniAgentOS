@@ -1,0 +1,53 @@
+{
+  "goal_id": "m4-loop-summarize-url-openai",
+  "goal": "Validate the real runtime M4 bootstrap line with one explicit M4 prompt and one fetch_url tool call.",
+  "requires_guest_openai": true,
+  "input_mode": "text_line",
+  "input_payload": "m4 Read {{SOURCE_URL}} and summarize it in two bullet points.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 120,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "model_turn_completed",
+      "tool_call_requested",
+      "tool_call_started",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_completed"
+    ],
+    "session_transcript_required": true,
+    "expected_turn_count": 1,
+    "max_tool_calls": 2,
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "fetch_url"
+      }
+    ],
+    "result_required": false,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "honest tool loop"
+    ],
+    "request_counts": {
+      "source_requests": 1,
+      "interpretation_requests": 0,
+      "model_requests": 0,
+      "x_post_requests": 0,
+      "x_search_requests": 0,
+      "x_user_posts_requests": 0
+    }
+  }
+}

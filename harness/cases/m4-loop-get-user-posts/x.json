@@ -1,0 +1,16 @@
+{
+  "users": {
+    "karpathy": [
+      {
+        "id": "post-10",
+        "author": "karpathy",
+        "text": "A good agent runtime needs the right loop shape before it needs a giant tool list."
+      },
+      {
+        "id": "post-11",
+        "author": "karpathy",
+        "text": "Session state is underrated. Even a tiny scratchpad changes follow-up behavior a lot."
+      }
+    ]
+  }
+}

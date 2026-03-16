@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+./bin/check
+./bin/run-case harness/cases/m0-fetch-summarize-post/task.json --config harness/config.fixture.json --output output/validate-m0
