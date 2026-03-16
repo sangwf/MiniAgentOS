@@ -145,6 +145,9 @@ purpose operating system. The harness is a first-class part of the system.
 
 ## M5 Direction
 
+Status: planned only. M5 is defined in docs, but it is not implemented in the
+runtime yet.
+
 - Add a bounded workspace abstraction.
 - Add real file inspection and editing tools.
 - Add a real bounded execution primitive and observable output.

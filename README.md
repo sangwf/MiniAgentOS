@@ -7,6 +7,15 @@ evaluation hooks.
 
 ## Milestones
 
+Current implementation status:
+
+- `M0`: implemented
+- `M1`: implemented
+- `M2`: implemented
+- `M3`: implemented
+- `M4`: implemented
+- `M5`: planned only, not implemented yet
+
 Milestone 0 is `Boot to Live Agent`:
 
 - boot into an agent-first prompt
@@ -87,6 +96,10 @@ Milestone 5 is `Workspace And Execution Substrate`:
 - add a real bounded execution primitive
 - add observable process output
 - start validating true inspect/edit/run/observe coding loops in the harness
+
+M5 is a roadmap milestone only at the moment. The repository contains the M5
+spec, but the real runtime does not yet expose the M5 workspace or execution
+substrate.
 
 The formal milestone specs live in:
 
