@@ -97,7 +97,7 @@ pub(crate) static mut TXQ: Virtq = Virtq::empty();
 
 const RX_BUF_LEN: usize = 8192;
 const RX_BUF_COUNT_MAX: usize = 8;
-const TX_BUF_LEN: usize = 2048;
+const TX_BUF_LEN: usize = 8192;
 const TX_FRAME_OVERHEAD: usize = VIRTIO_NET_HDR_LEN + ETH_HDR_LEN + 20 + 20;
 pub(crate) static mut TX_BUF: [u8; TX_BUF_LEN] = [0u8; TX_BUF_LEN];
 static mut TX_LAST_SENT: u16 = 0;
@@ -917,29 +917,16 @@ pub fn parse_rx_arp() -> bool {
         if op != 2 {
             return false;
         }
-        uart::write_str("virtio-net rx arp reply\n");
-        uart::write_str("virtio-net rx arp sender mac: ");
         let mut smac = [0u8; 6];
         for j in 0..6 {
             let b = mmio::read8(arp + 8 + j);
             smac[j] = b;
-            uart::write_u64_hex(b as u64);
-            if j != 5 {
-                uart::write_str(":");
-            }
         }
-        uart::write_str("\n");
-        uart::write_str("virtio-net rx arp sender ip: ");
         let mut sip = [0u8; 4];
         for j in 0..4 {
             let b = mmio::read8(arp + 14 + j);
             sip[j] = b;
-            uart::write_u64_hex(b as u64);
-            if j != 3 {
-                uart::write_str(".");
-            }
         }
-        uart::write_str("\n");
         LAST_ARP_MAC = smac;
         LAST_ARP_IP = sip;
         LAST_ARP_VALID = true;

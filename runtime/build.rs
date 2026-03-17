@@ -39,6 +39,10 @@ fn main() {
     println!("cargo:rerun-if-changed=third_party/mbedtls");
     println!("cargo:rerun-if-changed=xsecret.txt");
     println!("cargo:rerun-if-env-changed=OPENAI_API_KEY");
+    println!("cargo:rerun-if-env-changed=MINIOS_USE_HOST_SOCKS5_PROXY");
+    println!("cargo:rerun-if-env-changed=MINIOS_HOST_SOCKS5_PORT");
+    println!("cargo:rerun-if-env-changed=MINIOS_ENABLE_NATIVE_OPENAI_TRANSPORT_REUSE");
+    println!("cargo:rerun-if-env-changed=MINIOS_DISABLE_AUTO_TLS_LOCAL_FETCH");
     println!("cargo:rerun-if-env-changed=X_BEARER_TOKEN");
     println!("cargo:rerun-if-env-changed=X_CONSUMER_KEY");
     println!("cargo:rerun-if-env-changed=X_CONSUMER_KEY_SECRET");
@@ -127,6 +131,53 @@ fn main() {
     openai_out.push_str(&(!openai_api_key.is_empty()).to_string());
     openai_out.push_str(";\n");
     std::fs::write(openai_out_path, openai_out).expect("write openai_secrets.rs");
+
+    let proxy_enabled = matches!(
+        std::env::var("MINIOS_USE_HOST_SOCKS5_PROXY")
+            .unwrap_or_default()
+            .trim(),
+        "1" | "true" | "TRUE" | "yes" | "YES"
+    );
+    let native_openai_reuse_enabled = matches!(
+        std::env::var("MINIOS_ENABLE_NATIVE_OPENAI_TRANSPORT_REUSE")
+            .unwrap_or_default()
+            .trim(),
+        "1" | "true" | "TRUE" | "yes" | "YES"
+    );
+    let openai_bridge_enabled = matches!(
+        std::env::var("MINIOS_USE_OPENAI_HOST_BRIDGE")
+            .unwrap_or_default()
+            .trim(),
+        "1" | "true" | "TRUE" | "yes" | "YES"
+    );
+    let auto_tls_local_fetch_enabled = !matches!(
+        std::env::var("MINIOS_DISABLE_AUTO_TLS_LOCAL_FETCH")
+            .unwrap_or_default()
+            .trim(),
+        "1" | "true" | "TRUE" | "yes" | "YES"
+    );
+    let proxy_port = std::env::var("MINIOS_HOST_SOCKS5_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(7897);
+    let build_cfg_path = Path::new(&out_dir).join("build_config.rs");
+    let mut build_cfg = String::new();
+    build_cfg.push_str("pub const HOST_SOCKS5_PROXY_ENABLED: bool = ");
+    build_cfg.push_str(&proxy_enabled.to_string());
+    build_cfg.push_str(";\n");
+    build_cfg.push_str("pub const HOST_OPENAI_BRIDGE_ENABLED: bool = ");
+    build_cfg.push_str(&openai_bridge_enabled.to_string());
+    build_cfg.push_str(";\n");
+    build_cfg.push_str("pub const NATIVE_OPENAI_TRANSPORT_REUSE_ENABLED: bool = ");
+    build_cfg.push_str(&native_openai_reuse_enabled.to_string());
+    build_cfg.push_str(";\n");
+    build_cfg.push_str("pub const AUTO_TLS_LOCAL_FETCH_ENABLED: bool = ");
+    build_cfg.push_str(&auto_tls_local_fetch_enabled.to_string());
+    build_cfg.push_str(";\n");
+    build_cfg.push_str("pub const HOST_SOCKS5_PROXY_PORT: u16 = ");
+    build_cfg.push_str(&proxy_port.to_string());
+    build_cfg.push_str(";\n");
+    std::fs::write(build_cfg_path, build_cfg).expect("write build_config.rs");
 }
 
 fn escape_bytes(s: &str) -> String {

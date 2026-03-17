@@ -148,7 +148,7 @@ pub(super) fn fetch_start_agent_url(url: &[u8], src_ip: [u8; 4], reply_ip: [u8; 
         src_ip,
         reply_ip,
         src_port,
-        parts.https,
+        if parts.https { 1 } else { 0 },
         parts.port,
         fixed_ip,
     )

@@ -14,10 +14,13 @@ mod oauth;
 mod openai;
 mod agent;
 
+include!(concat!(env!("OUT_DIR"), "/build_config.rs"));
+
 #[global_allocator]
 static ALLOC: allocator::BumpAllocator = allocator::BumpAllocator::new();
 
 const AUTO_FETCH: bool = false;
+const AUTO_TLS_LOCAL_FETCH: bool = AUTO_TLS_LOCAL_FETCH_ENABLED;
 const AUTO_DOMAIN: &[u8] = b"neverssl.com";
 const AUTO_PATH: &[u8] = b"/";
 const AUTO_USE_FIXED_IP: bool = false;
@@ -31,6 +34,24 @@ const X_SEARCH_RECENT_PATH_SUFFIX: &[u8] =
     b"&max_results=10&tweet.fields=created_at,public_metrics";
 const SYNC_DOMAIN: &[u8] = b"httpbin.org";
 const SYNC_PATH: &[u8] = b"/get";
+const TLS_LOCAL_DOMAIN: &[u8] = b"localhost";
+const TLS_LOCAL_IP: [u8; 4] = [10, 0, 2, 2];
+const TLS_LOCAL_PATH: &[u8] = b"/";
+const TLS_LOCAL_PORT: u16 = 8443;
+const M5_BRIDGE_DOMAIN: &[u8] = b"10.0.2.2";
+const M5_BRIDGE_IP: [u8; 4] = [10, 0, 2, 2];
+const M5_BRIDGE_PORT: u16 = 8090;
+const M5_BRIDGE_HEALTH_PATH: &[u8] = b"/healthz";
+const M5_BRIDGE_LIST_PREFIX: &[u8] = b"/workspace/list?path=";
+const M5_BRIDGE_LIST_SUFFIX: &[u8] = b"&depth=3";
+const M5_BRIDGE_READ_PREFIX: &[u8] = b"/workspace/read?path=";
+const M5_BRIDGE_READ_SUFFIX: &[u8] = b"&offset=0&limit=1024";
+const M5_BRIDGE_WRITE_PATH: &[u8] = b"/workspace/write";
+const M5_BRIDGE_APPLY_PATCH_PATH: &[u8] = b"/workspace/apply-patch";
+const M5_BRIDGE_RUN_PYTHON_PATH: &[u8] = b"/process/run-python";
+const M5_BRIDGE_OUTPUT_PREFIX: &[u8] = b"/process/output?id=";
+const M5_BRIDGE_OPENAI_RESPONSES_PATH: &[u8] = b"/openai/responses";
+const M5_PYTHON_RUN_TIMEOUT_SEC: u32 = 5;
 
 static mut UDP_REPLY_BUF: [u8; 1600] = [0u8; 1600];
 static mut UDP_PAYLOAD_BUF: [u8; 128] = [0u8; 128];
@@ -127,9 +148,10 @@ static mut FETCH_REDIR_PATH_LEN: usize = 0;
 static mut FETCH_REDIR_HTTPS: bool = false;
 const FETCH_MAX_REDIRECTS: u8 = 3;
 
-const PROXY_SOCKS5: bool = true;
+const PROXY_SOCKS5: bool = HOST_SOCKS5_PROXY_ENABLED;
+const NATIVE_OPENAI_REUSE: bool = NATIVE_OPENAI_TRANSPORT_REUSE_ENABLED;
 const PROXY_IP: [u8; 4] = [10, 0, 2, 2];
-const PROXY_PORT: u16 = 7897;
+const PROXY_PORT: u16 = HOST_SOCKS5_PROXY_PORT;
 static mut TLS_HTTP_LEN: usize = 0;
 static mut TLS_HTTP_OFF: usize = 0;
 static mut TLS_TCP_LOGS: u8 = 0;
@@ -150,6 +172,21 @@ static mut FETCH_TRACE_LAST_STATE: u8 = 0xff;
 static mut FETCH_PEER_CLOSED: bool = false;
 static mut FETCH_OPENAI_REQUEST: bool = false;
 static mut FETCH_OPENAI_REUSABLE: bool = false;
+static mut FETCH_DEBUG_START_CALLS: u32 = 0;
+static mut FETCH_DEBUG_SET_HTTPS: bool = false;
+static mut FETCH_DEBUG_SET_HTTPS_BYTE: u8 = 0;
+static mut FETCH_DEBUG_SET_PATH_LEN: usize = 0;
+static mut FETCH_DEBUG_POST_RESET_HTTPS: bool = false;
+static mut FETCH_DEBUG_POST_RESET_HTTPS_BYTE: u8 = 0;
+static mut FETCH_DEBUG_POST_RESET_PATH_LEN: usize = 0;
+static mut FETCH_DEBUG_POST_STATE_HTTPS: bool = false;
+static mut FETCH_DEBUG_POST_STATE_HTTPS_BYTE: u8 = 0;
+static mut FETCH_DEBUG_POST_STATE_PATH_LEN: usize = 0;
+static mut FETCH_DEBUG_FINAL_HTTPS: bool = false;
+static mut FETCH_DEBUG_FINAL_HTTPS_BYTE: u8 = 0;
+static mut FETCH_DEBUG_SYNACK_HTTPS: bool = false;
+static mut FETCH_DEBUG_SYNACK_PATH_LEN: usize = 0;
+static mut FETCH_DEBUG_LAST_ROUNDS_SET: u8 = 0;
 const DNS_CACHE_SLOTS: usize = 8;
 const DNS_CACHE_TTL_MS: u64 = 60_000;
 static mut DNS_CACHE_NAMES: [[u8; 256]; DNS_CACHE_SLOTS] = [[0u8; 256]; DNS_CACHE_SLOTS];
@@ -231,6 +268,7 @@ const AGENT_PHASE_M4_POST_TWEET: u8 = 8;
 const AGENT_PHASE_M4_SEARCH_RECENT: u8 = 9;
 const AGENT_PHASE_M4_GET_USER_POSTS: u8 = 10;
 const AGENT_PHASE_M4_SUMMARY_MODEL: u8 = 11;
+const AGENT_PHASE_M5_BRIDGE_TOOL: u8 = 12;
 const AGENT_TERMINAL_NONE: u8 = 0;
 const AGENT_TERMINAL_COMPLETED: u8 = 1;
 const AGENT_TERMINAL_REFUSED: u8 = 2;
@@ -300,6 +338,141 @@ fn append_urlencoded(buf: &mut [u8], idx: &mut usize, src: &[u8]) {
     }
 }
 
+fn append_json_escaped(buf: &mut [u8], idx: &mut usize, src: &[u8]) {
+    let mut i = 0usize;
+    while i < src.len() && *idx < buf.len() {
+        let b = src[i];
+        match b {
+            b'"' | b'\\' => {
+                if *idx + 2 > buf.len() {
+                    return;
+                }
+                buf[*idx] = b'\\';
+                buf[*idx + 1] = b;
+                *idx += 2;
+            }
+            b'\n' => {
+                if *idx + 2 > buf.len() {
+                    return;
+                }
+                buf[*idx] = b'\\';
+                buf[*idx + 1] = b'n';
+                *idx += 2;
+            }
+            b'\r' => {
+                if *idx + 2 > buf.len() {
+                    return;
+                }
+                buf[*idx] = b'\\';
+                buf[*idx + 1] = b'r';
+                *idx += 2;
+            }
+            b'\t' => {
+                if *idx + 2 > buf.len() {
+                    return;
+                }
+                buf[*idx] = b'\\';
+                buf[*idx + 1] = b't';
+                *idx += 2;
+            }
+            0x00..=0x1f | 0x7f => {
+                if *idx + 6 > buf.len() {
+                    return;
+                }
+                buf[*idx] = b'\\';
+                buf[*idx + 1] = b'u';
+                buf[*idx + 2] = b'0';
+                buf[*idx + 3] = b'0';
+                buf[*idx + 4] = b"0123456789ABCDEF"[(b >> 4) as usize];
+                buf[*idx + 5] = b"0123456789ABCDEF"[(b & 0x0f) as usize];
+                *idx += 6;
+            }
+            _ => {
+                buf[*idx] = b;
+                *idx += 1;
+            }
+        }
+        i += 1;
+    }
+}
+
+fn decode_shell_escapes(src: &[u8], out: &mut [u8]) -> usize {
+    let mut i = 0usize;
+    let mut n = 0usize;
+    while i < src.len() && n < out.len() {
+        if src[i] != b'\\' || i + 1 >= src.len() {
+            out[n] = src[i];
+            n += 1;
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let esc = src[i];
+        i += 1;
+        out[n] = match esc {
+            b'n' => b'\n',
+            b'r' => b'\r',
+            b't' => b'\t',
+            b'\\' => b'\\',
+            b'"' => b'"',
+            _ => esc,
+        };
+        n += 1;
+    }
+    n
+}
+
+fn build_m5_list_path(path: &[u8], out: &mut [u8]) -> usize {
+    let mut idx = 0usize;
+    append_bytes(out, &mut idx, M5_BRIDGE_LIST_PREFIX);
+    append_urlencoded(out, &mut idx, path);
+    append_bytes(out, &mut idx, M5_BRIDGE_LIST_SUFFIX);
+    idx
+}
+
+fn build_m5_read_path(path: &[u8], out: &mut [u8]) -> usize {
+    let mut idx = 0usize;
+    append_bytes(out, &mut idx, M5_BRIDGE_READ_PREFIX);
+    append_urlencoded(out, &mut idx, path);
+    append_bytes(out, &mut idx, M5_BRIDGE_READ_SUFFIX);
+    idx
+}
+
+fn build_m5_write_body(path: &[u8], content: &[u8], out: &mut [u8]) -> usize {
+    let mut idx = 0usize;
+    append_bytes(out, &mut idx, b"{\"path\":\"");
+    append_json_escaped(out, &mut idx, path);
+    append_bytes(out, &mut idx, b"\",\"content\":\"");
+    append_json_escaped(out, &mut idx, content);
+    append_bytes(out, &mut idx, b"\",\"create\":true,\"overwrite\":true}");
+    idx
+}
+
+fn build_m5_patch_body(patch: &[u8], out: &mut [u8]) -> usize {
+    let mut idx = 0usize;
+    append_bytes(out, &mut idx, b"{\"patch\":\"");
+    append_json_escaped(out, &mut idx, patch);
+    append_bytes(out, &mut idx, b"\"}");
+    idx
+}
+
+fn build_m5_run_python_body(path: &[u8], timeout_sec: u32, out: &mut [u8]) -> usize {
+    let mut idx = 0usize;
+    append_bytes(out, &mut idx, b"{\"path\":\"");
+    append_json_escaped(out, &mut idx, path);
+    append_bytes(out, &mut idx, b"\",\"timeout_sec\":");
+    append_u64_dec(out, &mut idx, timeout_sec as u64);
+    append_bytes(out, &mut idx, b"}");
+    idx
+}
+
+fn build_m5_output_path(process_id: &[u8], out: &mut [u8]) -> usize {
+    let mut idx = 0usize;
+    append_bytes(out, &mut idx, M5_BRIDGE_OUTPUT_PREFIX);
+    append_urlencoded(out, &mut idx, process_id);
+    idx
+}
+
 fn starts_with(buf: &[u8], len: usize, pat: &[u8]) -> bool {
     if len < pat.len() {
         return false;
@@ -330,6 +503,13 @@ fn starts_with_at(buf: &[u8], len: usize, off: usize, pat: &[u8]) -> bool {
 
 fn is_space(b: u8) -> bool {
     b == b' ' || b == b'\t' || b == b'\r' || b == b'\n'
+}
+
+fn is_url_host_char(b: u8) -> bool {
+    (b'0'..=b'9').contains(&b)
+        || (b'a'..=b'z').contains(&ascii_lower(b))
+        || b == b'.'
+        || b == b'-'
 }
 
 #[derive(Copy, Clone)]
@@ -393,13 +573,22 @@ fn parse_url(buf: &[u8], len: usize) -> Option<UrlParts> {
     let mut dot = false;
     let mut j = 0usize;
     while j < domain_len {
-        if buf[domain_start + j] == b'.' {
+        let c = buf[domain_start + j];
+        if c == b'.' {
             dot = true;
-            break;
+        } else if !is_url_host_char(c) {
+            return None;
         }
         j += 1;
     }
     if !dot {
+        return None;
+    }
+    if !is_url_host_char(buf[domain_start]) || buf[domain_start] == b'.' || buf[domain_start] == b'-' {
+        return None;
+    }
+    let domain_last = buf[domain_start + domain_len - 1];
+    if !is_url_host_char(domain_last) || domain_last == b'.' || domain_last == b'-' {
         return None;
     }
     let mut path_start = 0usize;
@@ -1146,6 +1335,30 @@ fn handle_uart_line(line: &[u8], len: usize) {
         }
         return;
     }
+    if len == 10 && starts_with(&line[..], len, b"tls-status") {
+        clear_inline_status();
+        print_tls_status();
+        return;
+    }
+    if len == 12 && starts_with(&line[..], len, b"fetch-status") {
+        clear_inline_status();
+        print_fetch_status();
+        return;
+    }
+    if len == 9 && starts_with(&line[..], len, b"tls-local") {
+        clear_inline_status();
+        if unsafe { FETCH_STATE } != FETCH_IDLE {
+            uart::write_str("busy\n");
+            return;
+        }
+        if start_tls_local_fetch() {
+            // Avoid extra UART output after arming fetch so transport state
+            // can be observed without the debug path perturbing it.
+        } else {
+            uart::write_str("tls local fetch failed\n");
+        }
+        return;
+    }
     if len > 11 && starts_with(&line[..], len, b"openai-key ") {
         clear_inline_status();
         let mut start = 11usize;
@@ -1161,6 +1374,196 @@ fn handle_uart_line(line: &[u8], len: usize) {
         return;
     }
     if agent::handle_session_command(line, len) {
+        return;
+    }
+    if len == 9 && starts_with(&line[..], len, b"m5-status") {
+        clear_inline_status();
+        if unsafe { FETCH_STATE } != FETCH_IDLE {
+            uart::write_str("busy\n");
+            return;
+        }
+        if start_m5_bridge_fetch(M5_BRIDGE_HEALTH_PATH) {
+            uart::write_str("m5 bridge status...\n");
+        } else {
+            uart::write_str("m5 bridge fetch failed\n");
+        }
+        return;
+    }
+    if (len == 7 && starts_with(&line[..], len, b"m5-list"))
+        || (len > 7 && starts_with(&line[..], len, b"m5-list "))
+    {
+        clear_inline_status();
+        if unsafe { FETCH_STATE } != FETCH_IDLE {
+            uart::write_str("busy\n");
+            return;
+        }
+        let mut start = 7usize;
+        while start < len && is_space(line[start]) {
+            start += 1;
+        }
+        let path = if start < len { &line[start..len] } else { &[][..] };
+        let mut path_buf = [0u8; 512];
+        let path_len = build_m5_list_path(path, &mut path_buf);
+        let started = start_m5_bridge_fetch(&path_buf[..path_len]);
+        if started {
+            uart::write_str("m5 listing workspace...\n");
+        } else {
+            uart::write_str("m5 bridge fetch failed\n");
+        }
+        return;
+    }
+    if len > 8 && starts_with(&line[..], len, b"m5-read ") {
+        clear_inline_status();
+        if unsafe { FETCH_STATE } != FETCH_IDLE {
+            uart::write_str("busy\n");
+            return;
+        }
+        let mut start = 8usize;
+        while start < len && is_space(line[start]) {
+            start += 1;
+        }
+        if start >= len {
+            uart::write_str("usage: m5-read <path>\n");
+            return;
+        }
+        let path = &line[start..len];
+        let mut path_buf = [0u8; 512];
+        let path_len = build_m5_read_path(path, &mut path_buf);
+        let started = start_m5_bridge_fetch(&path_buf[..path_len]);
+        if started {
+            uart::write_str("m5 reading file...\n");
+        } else {
+            uart::write_str("m5 bridge fetch failed\n");
+        }
+        return;
+    }
+    if len > 9 && starts_with(&line[..], len, b"m5-write ") {
+        clear_inline_status();
+        if unsafe { FETCH_STATE } != FETCH_IDLE {
+            uart::write_str("busy\n");
+            return;
+        }
+        let mut start = 9usize;
+        while start < len && is_space(line[start]) {
+            start += 1;
+        }
+        if start >= len {
+            uart::write_str("usage: m5-write <path> <content>\n");
+            return;
+        }
+        let mut path_end = start;
+        while path_end < len && !is_space(line[path_end]) {
+            path_end += 1;
+        }
+        let path = &line[start..path_end];
+        let mut content_start = path_end;
+        while content_start < len && is_space(line[content_start]) {
+            content_start += 1;
+        }
+        let raw_content = if content_start < len {
+            &line[content_start..len]
+        } else {
+            &[][..]
+        };
+        let mut content_buf = [0u8; 1024];
+        let content_len = decode_shell_escapes(raw_content, &mut content_buf);
+        let mut body_buf = [0u8; 1536];
+        let body_len = build_m5_write_body(path, &content_buf[..content_len], &mut body_buf);
+        if body_len == 0 {
+            uart::write_str("m5 write body too large\n");
+            return;
+        }
+        let started = start_m5_bridge_post(M5_BRIDGE_WRITE_PATH, &body_buf[..body_len]);
+        if started {
+            uart::write_str("m5 writing file...\n");
+        } else {
+            uart::write_str("m5 bridge fetch failed\n");
+        }
+        return;
+    }
+    if len > 15 && starts_with(&line[..], len, b"m5-apply-patch ") {
+        clear_inline_status();
+        if unsafe { FETCH_STATE } != FETCH_IDLE {
+            uart::write_str("busy\n");
+            return;
+        }
+        let mut start = 15usize;
+        while start < len && is_space(line[start]) {
+            start += 1;
+        }
+        if start >= len {
+            uart::write_str("usage: m5-apply-patch <escaped-patch>\n");
+            return;
+        }
+        let raw_patch = &line[start..len];
+        let mut patch_buf = [0u8; 2048];
+        let patch_len = decode_shell_escapes(raw_patch, &mut patch_buf);
+        let mut body_buf = [0u8; 3072];
+        let body_len = build_m5_patch_body(&patch_buf[..patch_len], &mut body_buf);
+        if body_len == 0 {
+            uart::write_str("m5 patch body too large\n");
+            return;
+        }
+        let started = start_m5_bridge_post(M5_BRIDGE_APPLY_PATCH_PATH, &body_buf[..body_len]);
+        if started {
+            uart::write_str("m5 applying patch...\n");
+        } else {
+            uart::write_str("m5 bridge fetch failed\n");
+        }
+        return;
+    }
+    if len > 7 && starts_with(&line[..], len, b"m5-run ") {
+        clear_inline_status();
+        if unsafe { FETCH_STATE } != FETCH_IDLE {
+            uart::write_str("busy\n");
+            return;
+        }
+        let mut start = 7usize;
+        while start < len && is_space(line[start]) {
+            start += 1;
+        }
+        if start >= len {
+            uart::write_str("usage: m5-run <path>\n");
+            return;
+        }
+        let path = &line[start..len];
+        let mut body_buf = [0u8; 512];
+        let body_len = build_m5_run_python_body(path, M5_PYTHON_RUN_TIMEOUT_SEC, &mut body_buf);
+        if body_len == 0 {
+            uart::write_str("m5 run body too large\n");
+            return;
+        }
+        let started = start_m5_bridge_post(M5_BRIDGE_RUN_PYTHON_PATH, &body_buf[..body_len]);
+        if started {
+            uart::write_str("m5 running python...\n");
+        } else {
+            uart::write_str("m5 bridge fetch failed\n");
+        }
+        return;
+    }
+    if len > 10 && starts_with(&line[..], len, b"m5-output ") {
+        clear_inline_status();
+        if unsafe { FETCH_STATE } != FETCH_IDLE {
+            uart::write_str("busy\n");
+            return;
+        }
+        let mut start = 10usize;
+        while start < len && is_space(line[start]) {
+            start += 1;
+        }
+        if start >= len {
+            uart::write_str("usage: m5-output <process-id>\n");
+            return;
+        }
+        let process_id = &line[start..len];
+        let mut path_buf = [0u8; 256];
+        let path_len = build_m5_output_path(process_id, &mut path_buf);
+        let started = start_m5_bridge_fetch(&path_buf[..path_len]);
+        if started {
+            uart::write_str("m5 reading process output...\n");
+        } else {
+            uart::write_str("m5 bridge fetch failed\n");
+        }
         return;
     }
     if (len > 6 && starts_with(&line[..], len, b"tweet "))
@@ -1553,6 +1956,10 @@ fn parse_month(buf: &[u8], idx: &mut usize) -> Option<u8> {
         (b'd', b'e', b'c') => Some(12),
         _ => None,
     }
+}
+
+fn tcp_seq_cmp(a: u32, b: u32) -> i32 {
+    a.wrapping_sub(b) as i32
 }
 
 fn date_to_epoch(year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8) -> Option<u64> {
@@ -2081,11 +2488,20 @@ fn fetch_start_ex(
     src_ip: [u8; 4],
     reply_ip: [u8; 4],
     src_port: u16,
-    https: bool,
+    https_flag: u8,
     target_port: u16,
     fixed_ip: Option<[u8; 4]>,
 ) -> bool {
-    if domain.is_empty() {
+    let domain_len = domain.len();
+    let path_len = path.len();
+    let https = https_flag != 0;
+    let src_ip_value = src_ip;
+    let reply_ip_value = reply_ip;
+    let src_port_value = src_port;
+    let target_port_value = target_port;
+    let fixed_ip_present = fixed_ip.is_some();
+    let fixed_ip_value = fixed_ip.unwrap_or([0u8; 4]);
+    if domain_len == 0 {
         set_fetch_error_reason(b"url host missing");
         return false;
     }
@@ -2094,17 +2510,18 @@ fn fetch_start_ex(
             FETCH_EXTRA_HEADER_LEN = 0;
         }
     }
-    if domain.len() > unsafe { FETCH_DOMAIN.len() } {
+    if domain_len > unsafe { FETCH_DOMAIN.len() } {
         set_fetch_error_reason(b"url host too long");
         return false;
     }
-    if path.len() > unsafe { FETCH_PATH.len() } {
+    if path_len > unsafe { FETCH_PATH.len() } {
         set_fetch_error_reason(b"url path too long");
         return false;
     }
     let use_proxy = PROXY_SOCKS5 && https;
-    let openai_request = crate::openai::is_responses_target(domain, path, https, target_port);
-    let can_reuse_openai = use_proxy && fetch_openai_reuse_candidate(domain, path, https, target_port);
+    let openai_request = crate::openai::is_responses_target(domain, path, https, target_port_value);
+    let can_reuse_openai =
+        use_proxy && fetch_openai_reuse_candidate(domain, path, https, target_port_value);
     if !can_reuse_openai && unsafe { FETCH_OPENAI_REUSABLE } {
         fetch_close_current_transport();
     }
@@ -2122,13 +2539,20 @@ fn fetch_start_ex(
         have_dns = true;
         agent::trace_fetch_cache_hit(b"arp", b"dns");
     }
+    // QEMU user-mode networking exposes DNS at 10.0.2.3, but the packet still
+    // egresses through the same virtual gateway MAC as 10.0.2.2. If we already
+    // know the gateway MAC, treat it as a safe fallback for DNS as well.
+    if !have_dns && have_gw {
+        dns_mac = gw_mac;
+        have_dns = true;
+    }
     unsafe {
         if use_proxy && !have_gw && FETCH_HAVE_GW {
             gw_mac = FETCH_GW_MAC;
             have_gw = true;
         }
     }
-    let cached_dns_ip = if !use_proxy && fixed_ip.is_none() && !AUTO_USE_FIXED_IP {
+    let cached_dns_ip = if !use_proxy && !fixed_ip_present && !AUTO_USE_FIXED_IP {
         dns_cache_lookup(domain)
     } else {
         None
@@ -2139,23 +2563,24 @@ fn fetch_start_ex(
     if can_reuse_openai {
         unsafe {
             let mut k = 0usize;
-            while k < domain.len() {
+            while k < domain_len {
                 FETCH_DOMAIN[k] = domain[k];
                 k += 1;
             }
-            FETCH_DOMAIN_LEN = domain.len();
+            fetch_set_domain_len(domain_len);
             k = 0;
-            while k < path.len() {
+            while k < path_len {
                 FETCH_PATH[k] = path[k];
                 k += 1;
             }
-            FETCH_PATH_LEN = path.len();
-            FETCH_SRC_IP = src_ip;
-            FETCH_REPLY_IP = reply_ip;
-            FETCH_SRC_PORT = src_port;
-            FETCH_HTTPS = https;
+            fetch_set_path_len(path_len);
+            FETCH_SRC_IP = src_ip_value;
+            FETCH_REPLY_IP = reply_ip_value;
+            FETCH_SRC_PORT = src_port_value;
+            fetch_set_https(https);
+            FETCH_DEBUG_SET_HTTPS_BYTE = fetch_https_byte_raw();
             FETCH_PROXY = true;
-            FETCH_TARGET_PORT = target_port;
+            FETCH_TARGET_PORT = target_port_value;
             FETCH_DST_PORT = PROXY_PORT;
             FETCH_HAVE_FIXED_IP = false;
             FETCH_OPENAI_REQUEST = openai_request;
@@ -2172,7 +2597,7 @@ fn fetch_start_ex(
             FETCH_HTTP_LEN = 0;
             FETCH_ACK_SENT = true;
             FETCH_DEADLINE_MS = 0;
-            FETCH_ROUNDS = 0;
+            fetch_set_rounds(0);
             FETCH_REPLY_SENT = false;
             FETCH_REPLY_PENDING = false;
             FETCH_REPLY_BYTES = 0;
@@ -2196,33 +2621,37 @@ fn fetch_start_ex(
         return true;
     }
     unsafe {
+        FETCH_DEBUG_START_CALLS = FETCH_DEBUG_START_CALLS.wrapping_add(1);
         let mut k = 0usize;
-        while k < domain.len() {
+        while k < domain_len {
             FETCH_DOMAIN[k] = domain[k];
             k += 1;
         }
-        FETCH_DOMAIN_LEN = domain.len();
+        fetch_set_domain_len(domain_len);
         k = 0;
-        while k < path.len() {
+        while k < path_len {
             FETCH_PATH[k] = path[k];
             k += 1;
         }
-        FETCH_PATH_LEN = path.len();
-        FETCH_SRC_IP = src_ip;
-        FETCH_REPLY_IP = reply_ip;
-        FETCH_SRC_PORT = src_port;
+        fetch_set_path_len(path_len);
+        FETCH_SRC_IP = src_ip_value;
+        FETCH_REPLY_IP = reply_ip_value;
+        FETCH_SRC_PORT = src_port_value;
         FETCH_TCP_SRC_PORT = NEXT_TCP_PORT;
         NEXT_TCP_PORT = NEXT_TCP_PORT.wrapping_add(1);
         if NEXT_TCP_PORT == 0 {
             NEXT_TCP_PORT = 40000;
         }
-        FETCH_HTTPS = https;
+        fetch_set_https(https);
+        FETCH_DEBUG_SET_HTTPS = fetch_https_raw();
+        FETCH_DEBUG_SET_HTTPS_BYTE = fetch_https_byte_raw();
+        FETCH_DEBUG_SET_PATH_LEN = fetch_path_len_raw();
         FETCH_SOCKS_SENT = false;
         FETCH_PROXY = use_proxy;
-        FETCH_TARGET_PORT = target_port;
+        FETCH_TARGET_PORT = target_port_value;
         FETCH_DST_PORT = if FETCH_PROXY { PROXY_PORT } else { FETCH_TARGET_PORT };
-        FETCH_HAVE_FIXED_IP = fixed_ip.is_some();
-        FETCH_FIXED_IP = fixed_ip.unwrap_or([0u8; 4]);
+        FETCH_HAVE_FIXED_IP = fixed_ip_present;
+        FETCH_FIXED_IP = fixed_ip_value;
         FETCH_OPENAI_REQUEST = openai_request;
         FETCH_OPENAI_REUSABLE = false;
         FETCH_HAVE_GW = have_gw;
@@ -2235,11 +2664,33 @@ fn fetch_start_ex(
         }
         FETCH_RETRY = 0;
         FETCH_NEXT_MS = 0;
+        if DEBUG_NET {
+            uart::write_str("fetch after-next round=");
+            uart::write_u64_dec(FETCH_ROUNDS as u64);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_rounds_raw() as u64);
+            uart::write_str(" next_ms=");
+            uart::write_u64_dec(FETCH_NEXT_MS);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_next_ms_raw());
+            uart::write_str("\n");
+        }
         FETCH_GOT_RESP = false;
         FETCH_SEQ = 0x1000;
         FETCH_ACK = 0;
         FETCH_TCP_ESTABLISHED = false;
         FETCH_TX_USED = net::tx_used_idx();
+        if DEBUG_NET {
+            uart::write_str("fetch after-txused round=");
+            uart::write_u64_dec(FETCH_ROUNDS as u64);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_rounds_raw() as u64);
+            uart::write_str(" next_ms=");
+            uart::write_u64_dec(FETCH_NEXT_MS);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_next_ms_raw());
+            uart::write_str("\n");
+        }
         FETCH_TX_INFLIGHT = false;
         FETCH_HTTP_SENT = false;
         FETCH_HTTP_RETRY = 0;
@@ -2247,7 +2698,18 @@ fn fetch_start_ex(
         FETCH_HTTP_LEN = 0;
         FETCH_ACK_SENT = false;
         FETCH_DEADLINE_MS = 0;
-        FETCH_ROUNDS = 0;
+        fetch_set_rounds(0);
+        if DEBUG_NET {
+            uart::write_str("fetch after-round round=");
+            uart::write_u64_dec(FETCH_ROUNDS as u64);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_rounds_raw() as u64);
+            uart::write_str(" next_ms=");
+            uart::write_u64_dec(FETCH_NEXT_MS);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_next_ms_raw());
+            uart::write_str("\n");
+        }
         FETCH_REPLY_SENT = false;
         FETCH_REPLY_PENDING = false;
         FETCH_REPLY_BYTES = 0;
@@ -2260,13 +2722,53 @@ fn fetch_start_ex(
         FETCH_REDIRECT_PENDING = false;
         FETCH_SUPPRESS_OK = false;
         FETCH_TRACE_LAST_STATE = 0xff;
+        if DEBUG_NET {
+            uart::write_str("fetch pre-reset state=");
+            uart::write_bytes(fetch_state_name(FETCH_STATE));
+            uart::write_str("/");
+            uart::write_bytes(fetch_state_name(fetch_state_raw()));
+            uart::write_str(" round=");
+            uart::write_u64_dec(FETCH_ROUNDS as u64);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_rounds_raw() as u64);
+            uart::write_str(" next_ms=");
+            uart::write_u64_dec(FETCH_NEXT_MS);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_next_ms_raw());
+            uart::write_str("\n");
+        }
         clear_fetch_error_reason();
         http_reset();
+        FETCH_DEBUG_POST_RESET_HTTPS = fetch_https_raw();
+        FETCH_DEBUG_POST_RESET_HTTPS_BYTE = fetch_https_byte_raw();
+        FETCH_DEBUG_POST_RESET_PATH_LEN = fetch_path_len_raw();
+        if DEBUG_NET {
+            uart::write_str("fetch post-reset state=");
+            uart::write_bytes(fetch_state_name(FETCH_STATE));
+            uart::write_str("/");
+            uart::write_bytes(fetch_state_name(fetch_state_raw()));
+            uart::write_str(" round=");
+            uart::write_u64_dec(FETCH_ROUNDS as u64);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_rounds_raw() as u64);
+            uart::write_str(" next_ms=");
+            uart::write_u64_dec(FETCH_NEXT_MS);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_next_ms_raw());
+            uart::write_str("\n");
+        }
         let now_ms = timer::ticks_to_ms(timer::counter_ticks(), timer::counter_freq_hz());
+        if DEBUG_NET {
+            uart::write_str("fetch now_ms=");
+            uart::write_u64_dec(now_ms);
+            uart::write_str(" cooldown=");
+            uart::write_u64_dec(FETCH_TRANSPORT_COOLDOWN_UNTIL_MS);
+            uart::write_str("\n");
+        }
         if FETCH_TRANSPORT_COOLDOWN_UNTIL_MS > now_ms {
             FETCH_NEXT_MS = FETCH_TRANSPORT_COOLDOWN_UNTIL_MS;
         }
-        if src_port == 0 {
+        if src_port_value == 0 {
             FETCH_HAVE_PEER = false;
         }
         TLS_HTTP_LEN = 0;
@@ -2288,9 +2790,43 @@ fn fetch_start_ex(
         } else {
             FETCH_STATE = if FETCH_HAVE_GW { FETCH_DNS } else { FETCH_ARP };
         }
+        FETCH_DEBUG_POST_STATE_HTTPS = fetch_https_raw();
+        FETCH_DEBUG_POST_STATE_HTTPS_BYTE = fetch_https_byte_raw();
+        FETCH_DEBUG_POST_STATE_PATH_LEN = fetch_path_len_raw();
+        fetch_set_https(https);
+        FETCH_DEBUG_FINAL_HTTPS = fetch_https_raw();
+        FETCH_DEBUG_FINAL_HTTPS_BYTE = fetch_https_byte_raw();
+        if DEBUG_NET {
+            uart::write_str("fetch post-state state=");
+            uart::write_bytes(fetch_state_name(FETCH_STATE));
+            uart::write_str("/");
+            uart::write_bytes(fetch_state_name(fetch_state_raw()));
+            uart::write_str(" round=");
+            uart::write_u64_dec(FETCH_ROUNDS as u64);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_rounds_raw() as u64);
+            uart::write_str(" next_ms=");
+            uart::write_u64_dec(FETCH_NEXT_MS);
+            uart::write_str("/");
+            uart::write_u64_dec(fetch_next_ms_raw());
+            uart::write_str("\n");
+        }
     }
     if DEBUG_NET {
         uart::write_str("fetch start\n");
+        uart::write_str("fetch init state=");
+        uart::write_bytes(fetch_state_name(unsafe { FETCH_STATE }));
+        uart::write_str("/");
+        uart::write_bytes(fetch_state_name(fetch_state_raw()));
+        uart::write_str(" round=");
+        uart::write_u64_dec(unsafe { FETCH_ROUNDS as u64 });
+        uart::write_str("/");
+        uart::write_u64_dec(fetch_rounds_raw() as u64);
+        uart::write_str(" next_ms=");
+        uart::write_u64_dec(unsafe { FETCH_NEXT_MS });
+        uart::write_str("/");
+        uart::write_u64_dec(fetch_next_ms_raw());
+        uart::write_str("\n");
     }
     fetch_trace_phase_if_needed();
     true
@@ -2310,10 +2846,92 @@ fn fetch_start(
         src_ip,
         reply_ip,
         src_port,
-        https,
+        if https { 1 } else { 0 },
         if https { 443 } else { 80 },
         None,
     )
+}
+
+fn start_m5_bridge_fetch(path: &[u8]) -> bool {
+    unsafe {
+        FETCH_METHOD_POST = false;
+        FETCH_BODY_LEN = 0;
+        FETCH_EXTRA_HEADER_LEN = 0;
+        FETCH_OAUTH_ACTIVE = false;
+    }
+    fetch_start_ex(
+        M5_BRIDGE_DOMAIN,
+        path,
+        [10, 0, 2, 15],
+        [0, 0, 0, 0],
+        0,
+        0,
+        M5_BRIDGE_PORT,
+        Some(M5_BRIDGE_IP),
+    )
+}
+
+fn start_m5_bridge_post(path: &[u8], body: &[u8]) -> bool {
+    if body.len() > unsafe { FETCH_BODY.len() } {
+        return false;
+    }
+    unsafe {
+        let mut i = 0usize;
+        while i < body.len() {
+            FETCH_BODY[i] = body[i];
+            i += 1;
+        }
+        FETCH_METHOD_POST = true;
+        FETCH_BODY_LEN = body.len();
+        FETCH_EXTRA_HEADER_LEN = 0;
+        FETCH_OAUTH_ACTIVE = false;
+    }
+    start_m5_bridge_post_current_body(path, body.len())
+}
+
+fn start_m5_bridge_post_current_body(path: &[u8], body_len: usize) -> bool {
+    if body_len > unsafe { FETCH_BODY.len() } {
+        return false;
+    }
+    unsafe {
+        FETCH_METHOD_POST = true;
+        FETCH_BODY_LEN = body_len;
+        FETCH_EXTRA_HEADER_LEN = 0;
+        FETCH_OAUTH_ACTIVE = false;
+    }
+    fetch_start_ex(
+        M5_BRIDGE_DOMAIN,
+        path,
+        [10, 0, 2, 15],
+        [0, 0, 0, 0],
+        0,
+        0,
+        M5_BRIDGE_PORT,
+        Some(M5_BRIDGE_IP),
+    )
+}
+
+fn start_tls_local_fetch() -> bool {
+    unsafe {
+        FETCH_METHOD_POST = false;
+        FETCH_BODY_LEN = 0;
+        FETCH_EXTRA_HEADER_LEN = 0;
+        FETCH_OAUTH_ACTIVE = false;
+    }
+    fetch_start_ex(
+        TLS_LOCAL_DOMAIN,
+        TLS_LOCAL_PATH,
+        [10, 0, 2, 15],
+        [0, 0, 0, 0],
+        0,
+        1,
+        TLS_LOCAL_PORT,
+        Some(TLS_LOCAL_IP),
+    )
+}
+
+fn start_m5_bridge_openai_post_current_body(body_len: usize) -> bool {
+    start_m5_bridge_post_current_body(M5_BRIDGE_OPENAI_RESPONSES_PATH, body_len)
 }
 
 fn arp_mac_for(ip: [u8; 4]) -> Option<[u8; 6]> {
@@ -2352,7 +2970,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                 }
             }
             if FETCH_ROUNDS < FETCH_MAX_ROUNDS {
-                FETCH_ROUNDS = FETCH_ROUNDS.wrapping_add(1);
+                fetch_set_rounds(FETCH_ROUNDS.wrapping_add(1));
                 FETCH_RETRY = 0;
                 FETCH_NEXT_MS = 0;
                 FETCH_HTTP_SENT = false;
@@ -2387,8 +3005,21 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
     }
     let gw_ip = [10, 0, 2, 2];
     let src_ip = unsafe { FETCH_SRC_IP };
-    let domain = unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] };
-    let _path = unsafe { &FETCH_PATH[..FETCH_PATH_LEN] };
+    let domain_len = fetch_domain_len_raw();
+    let path_len = fetch_path_len_raw();
+    if domain_len > unsafe { FETCH_DOMAIN.len() } || path_len > unsafe { FETCH_PATH.len() } {
+        uart::write_str("fetch len corrupt domain_len=");
+        uart::write_u64_dec(domain_len as u64);
+        uart::write_str(" path_len=");
+        uart::write_u64_dec(path_len as u64);
+        uart::write_str("\n");
+        unsafe {
+            FETCH_STATE = FETCH_DONE;
+        }
+        return;
+    }
+    let domain = unsafe { &FETCH_DOMAIN[..domain_len] };
+    let _path = unsafe { &FETCH_PATH[..path_len] };
     let peer_mac = unsafe { FETCH_GW_MAC };
     if state == FETCH_ARP {
         if DEBUG_NET {
@@ -2406,7 +3037,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
         if unsafe { FETCH_RETRY } >= FETCH_MAX_RETRY {
             unsafe {
                 if FETCH_ROUNDS < FETCH_MAX_ROUNDS {
-                    FETCH_ROUNDS = FETCH_ROUNDS.wrapping_add(1);
+                    fetch_set_rounds(FETCH_ROUNDS.wrapping_add(1));
                     FETCH_RETRY = 0;
                     FETCH_NEXT_MS = 0;
                     FETCH_HTTP_SENT = false;
@@ -2447,7 +3078,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
         if unsafe { FETCH_RETRY } >= FETCH_MAX_RETRY {
             unsafe {
                 if FETCH_ROUNDS < FETCH_MAX_ROUNDS {
-                    FETCH_ROUNDS = FETCH_ROUNDS.wrapping_add(1);
+                    fetch_set_rounds(FETCH_ROUNDS.wrapping_add(1));
                     FETCH_RETRY = 0;
                     FETCH_NEXT_MS = 0;
                     FETCH_HTTP_SENT = false;
@@ -2465,6 +3096,12 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
             return;
         }
         let dns_server = [10, 0, 2, 3];
+        unsafe {
+            if !FETCH_HAVE_DNS && FETCH_HAVE_GW {
+                FETCH_DNS_MAC = FETCH_GW_MAC;
+                FETCH_HAVE_DNS = true;
+            }
+        }
         if unsafe { !FETCH_HAVE_DNS } {
             if DEBUG_NET {
                 uart::write_str("arp dns send\n");
@@ -2511,7 +3148,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
         if unsafe { FETCH_RETRY } >= FETCH_MAX_RETRY {
             unsafe {
                 if FETCH_ROUNDS < FETCH_MAX_ROUNDS {
-                    FETCH_ROUNDS = FETCH_ROUNDS.wrapping_add(1);
+                    fetch_set_rounds(FETCH_ROUNDS.wrapping_add(1));
                     FETCH_RETRY = 0;
                     FETCH_NEXT_MS = 0;
                     FETCH_HTTP_SENT = false;
@@ -2599,7 +3236,8 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
         let dst_port = unsafe { FETCH_DST_PORT };
         let seq = unsafe { FETCH_SEQ };
         let ack = unsafe { FETCH_ACK };
-        let domain = unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] };
+        let domain_len = fetch_domain_len_raw();
+        let domain = unsafe { &FETCH_DOMAIN[..domain_len] };
         if domain.len() > 255 {
             set_fetch_error_reason(b"proxy request host too long");
             unsafe { FETCH_STATE = FETCH_DONE; }
@@ -2694,8 +3332,10 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
             }
             let dst_ip = unsafe { FETCH_DST_IP };
             let http_buf = unsafe { &mut HTTP_BUF };
-            let domain = unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] };
-            let path = unsafe { &FETCH_PATH[..FETCH_PATH_LEN] };
+            let domain_len = fetch_domain_len_raw();
+            let path_len = fetch_path_len_raw();
+            let domain = unsafe { &FETCH_DOMAIN[..domain_len] };
+            let path = unsafe { &FETCH_PATH[..path_len] };
             let req_len = build_http_request(domain, path, http_buf);
             if req_len == 0 {
                 set_fetch_error_reason(b"http request build failed");
@@ -2755,8 +3395,10 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
             uart::write_str("http retry send\n");
         }
         let http_buf = unsafe { &mut HTTP_BUF };
-        let domain = unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] };
-        let path = unsafe { &FETCH_PATH[..FETCH_PATH_LEN] };
+        let domain_len = fetch_domain_len_raw();
+        let path_len = fetch_path_len_raw();
+        let domain = unsafe { &FETCH_DOMAIN[..domain_len] };
+        let path = unsafe { &FETCH_PATH[..path_len] };
         let mut req_len = unsafe { FETCH_HTTP_LEN } as usize;
         if req_len == 0 {
             req_len = build_http_request(domain, path, http_buf);
@@ -2794,6 +3436,11 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
     if state == FETCH_TLS_HANDSHAKE {
         let ret = tls::handshake_step();
         if ret == 0 {
+            trace_tls_export_if_any();
+            trace_tls_cipher_diag_if_any();
+            trace_tls_record_diag_if_any();
+            trace_tls_cbc_diag_if_any();
+            trace_tls_mac_diag_if_any();
             unsafe {
                 FETCH_STATE = FETCH_TLS_HTTP;
                 TLS_HTTP_OFF = 0;
@@ -2832,14 +3479,43 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                 uart::write_str("\n");
             }
         }
+        let (x509_err, curve_id) = tls::debug_diag();
+        let skx_err = tls::debug_skx_err();
+        let skx_ret = tls::debug_skx_ret();
+        let verify_flags = tls::verify_result();
+        let state = tls::state();
+        trace_tls_export_if_any();
+        trace_tls_cipher_diag_if_any();
+        trace_tls_record_diag_if_any();
+        trace_tls_cbc_diag_if_any();
+        trace_tls_mac_diag_if_any();
+        agent::trace_tls_last_tx(
+            tls::last_tx_state(),
+            tls::state_label(tls::last_tx_state()),
+            tls::last_tx_out_ctr(),
+            tls::last_tx_buf(),
+        );
+        agent::trace_tls_handshake_failure(
+            ret,
+            x509_err,
+            curve_id,
+            skx_err,
+            skx_ret,
+            verify_flags,
+            state,
+            tls::state_label(state),
+            tls::error_label(ret),
+        );
         set_fetch_error_reason(b"tls handshake failed");
         unsafe { FETCH_STATE = FETCH_DONE; }
         return;
     }
     if state == FETCH_TLS_HTTP {
         let http_buf = unsafe { &mut HTTP_BUF };
-        let domain = unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] };
-        let path = unsafe { &FETCH_PATH[..FETCH_PATH_LEN] };
+        let domain_len = fetch_domain_len_raw();
+        let path_len = fetch_path_len_raw();
+        let domain = unsafe { &FETCH_DOMAIN[..domain_len] };
+        let path = unsafe { &FETCH_PATH[..path_len] };
         let mut req_len = unsafe { TLS_HTTP_LEN };
         if req_len == 0 {
             req_len = build_http_request(domain, path, http_buf);
@@ -2864,6 +3540,16 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
         if tls::want_retry(ret) {
             return;
         }
+        let state = tls::state();
+        agent::trace_tls_io_failure(
+            b"https_request",
+            ret,
+            tls::verify_result(),
+            tls::check_pending(),
+            state,
+            tls::state_label(state),
+            tls::error_label(ret),
+        );
         uart::write_str("tls write err: 0x");
         uart::write_u64_hex(ret as u64);
         uart::write_str("\n");
@@ -2904,6 +3590,16 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
         if tls::want_retry(ret) {
             return;
         }
+        let state = tls::state();
+        agent::trace_tls_io_failure(
+            b"https_read",
+            ret,
+            tls::verify_result(),
+            tls::check_pending(),
+            state,
+            tls::state_label(state),
+            tls::error_label(ret),
+        );
         uart::write_str("tls read err: 0x");
         uart::write_u64_hex(ret as u64);
         uart::write_str("\n");
@@ -3104,13 +3800,16 @@ fn fetch_http_response_complete() -> bool {
 }
 
 fn fetch_openai_reuse_candidate(domain: &[u8], path: &[u8], https: bool, target_port: u16) -> bool {
+    if !NATIVE_OPENAI_REUSE {
+        return false;
+    }
     if !crate::openai::is_responses_target(domain, path, https, target_port) {
         return false;
     }
     unsafe {
         FETCH_OPENAI_REUSABLE
             && FETCH_TCP_ESTABLISHED
-            && FETCH_HTTPS
+            && fetch_https_raw()
             && FETCH_PROXY
             && !FETCH_PEER_CLOSED
             && FETCH_DST_IP == PROXY_IP
@@ -3120,6 +3819,9 @@ fn fetch_openai_reuse_candidate(domain: &[u8], path: &[u8], https: bool, target_
 }
 
 fn fetch_can_keep_openai_transport_open() -> bool {
+    if !NATIVE_OPENAI_REUSE {
+        return false;
+    }
     unsafe {
         FETCH_OPENAI_REQUEST
             && FETCH_TCP_ESTABLISHED
@@ -3127,7 +3829,250 @@ fn fetch_can_keep_openai_transport_open() -> bool {
             && !HTTP_IS_CHUNKED
             && HTTP_CONTENT_LEN != 0
             && fetch_http_response_complete()
+            && !tls::check_pending()
     }
+}
+
+fn fetch_current_close_seq_ack() -> (u32, u32) {
+    unsafe {
+        if fetch_https_raw() && FETCH_TCP_ESTABLISHED {
+            (tls::current_seq(), tls::current_ack())
+        } else {
+            (FETCH_SEQ, FETCH_ACK)
+        }
+    }
+}
+
+fn fetch_try_tls_close_notify() {
+    unsafe {
+        if !fetch_https_raw() || !FETCH_TCP_ESTABLISHED {
+            return;
+        }
+    }
+    let pending = tls::check_pending();
+    let verify_flags = tls::verify_result();
+    let ret = tls::close_notify_step();
+    agent::trace_tls_close_notify(ret, verify_flags, pending, tls::error_label(ret));
+}
+
+fn print_tls_status() {
+    let state = tls::state();
+    uart::write_str("tls state=");
+    uart::write_bytes(tls::state_label(state));
+    uart::write_str(" verify=");
+    uart::write_u64_dec(tls::verify_result() as u64);
+    uart::write_str(" pending=");
+    if tls::check_pending() {
+        uart::write_str("true");
+    } else {
+        uart::write_str("false");
+    }
+    uart::write_str("\n");
+    uart::write_str("tls export_count=");
+    uart::write_u64_dec(tls::export_count() as u64);
+    uart::write_str(" in_ctr=");
+    uart::write_u64_dec(tls::in_ctr());
+    uart::write_str(" out_ctr=");
+    uart::write_u64_dec(tls::cur_out_ctr());
+    uart::write_str("\n");
+    uart::write_str("tls aes_self=");
+    uart::write_u64_dec(tls::aes256_zero_key_self_hash());
+    uart::write_str(" key_hash=");
+    uart::write_u64_dec(tls::export_client_write_key_hash());
+    uart::write_str(" key_prefix=");
+    uart::write_u64_dec(tls::export_client_write_key_prefix());
+    uart::write_str("\n");
+    uart::write_str("tls key_aes_hash=");
+    uart::write_u64_dec(tls::export_client_write_key_aes_zero_hash());
+    uart::write_str(" key_aes_hash_static=");
+    uart::write_u64_dec(tls::export_client_write_key_aes_zero_hash_static());
+    uart::write_str("\n");
+}
+
+fn print_fetch_status() {
+    uart::write_str("fetch state=");
+    uart::write_bytes(fetch_state_name(unsafe { FETCH_STATE }));
+    uart::write_str("/");
+    uart::write_bytes(fetch_state_name(fetch_state_raw()));
+    uart::write_str(" https=");
+    uart::write_str(if fetch_https_raw() { "true" } else { "false" });
+    uart::write_str(" proxy=");
+    uart::write_str(if unsafe { FETCH_PROXY } { "true" } else { "false" });
+    uart::write_str(" inflight=");
+    uart::write_str(if unsafe { FETCH_TX_INFLIGHT } { "true" } else { "false" });
+    uart::write_str("\n");
+    uart::write_str("fetch retry=");
+    uart::write_u64_dec(unsafe { FETCH_RETRY as u64 });
+    uart::write_str(" round=");
+    uart::write_u64_dec(unsafe { FETCH_ROUNDS as u64 });
+    uart::write_str("/");
+    uart::write_u64_dec(fetch_rounds_raw() as u64);
+    uart::write_str(" next_ms=");
+    uart::write_u64_dec(unsafe { FETCH_NEXT_MS });
+    uart::write_str("/");
+    uart::write_u64_dec(fetch_next_ms_raw());
+    uart::write_str(" deadline_ms=");
+    uart::write_u64_dec(unsafe { FETCH_DEADLINE_MS });
+    uart::write_str("\n");
+    uart::write_str("fetch seq=");
+    uart::write_u64_dec(unsafe { FETCH_SEQ as u64 });
+    uart::write_str(" ack=");
+    uart::write_u64_dec(unsafe { FETCH_ACK as u64 });
+    uart::write_str(" src_port=");
+    uart::write_u64_dec(unsafe { FETCH_TCP_SRC_PORT as u64 });
+    uart::write_str(" dst_port=");
+    uart::write_u64_dec(unsafe { FETCH_DST_PORT as u64 });
+    uart::write_str("\n");
+    uart::write_str("fetch domain=");
+    let domain_len = fetch_domain_len_raw();
+    if domain_len <= unsafe { FETCH_DOMAIN.len() } {
+        uart::write_bytes(unsafe { &FETCH_DOMAIN[..domain_len] });
+    } else {
+        uart::write_str("<corrupt>");
+    }
+    uart::write_str(" path=");
+    let path_len = fetch_path_len_raw();
+    if path_len <= unsafe { FETCH_PATH.len() } {
+        uart::write_bytes(unsafe { &FETCH_PATH[..path_len] });
+    } else {
+        uart::write_str("<corrupt>");
+    }
+    uart::write_str("\n");
+    uart::write_str("fetch lens domain_len=");
+    uart::write_u64_dec(domain_len as u64);
+    uart::write_str(" path_len=");
+    uart::write_u64_dec(path_len as u64);
+    uart::write_str("\n");
+    let reason = fetch_error_reason();
+    uart::write_str("fetch reason=");
+    if reason.is_empty() {
+        uart::write_str("<empty>");
+    } else {
+        uart::write_bytes(reason);
+    }
+    uart::write_str("\n");
+    uart::write_str("fetch dbg calls=");
+    uart::write_u64_dec(unsafe { FETCH_DEBUG_START_CALLS as u64 });
+    uart::write_str(" set_https=");
+    uart::write_str(if unsafe { FETCH_DEBUG_SET_HTTPS } { "true" } else { "false" });
+    uart::write_str("/");
+    uart::write_u64_dec(unsafe { FETCH_DEBUG_SET_HTTPS_BYTE as u64 });
+    uart::write_str(" set_path_len=");
+    uart::write_u64_dec(unsafe { FETCH_DEBUG_SET_PATH_LEN as u64 });
+    uart::write_str("\n");
+    uart::write_str("fetch dbg post_reset_https=");
+    uart::write_str(if unsafe { FETCH_DEBUG_POST_RESET_HTTPS } { "true" } else { "false" });
+    uart::write_str("/");
+    uart::write_u64_dec(unsafe { FETCH_DEBUG_POST_RESET_HTTPS_BYTE as u64 });
+    uart::write_str(" post_reset_path_len=");
+    uart::write_u64_dec(unsafe { FETCH_DEBUG_POST_RESET_PATH_LEN as u64 });
+    uart::write_str("\n");
+    uart::write_str("fetch dbg post_state_https=");
+    uart::write_str(if unsafe { FETCH_DEBUG_POST_STATE_HTTPS } { "true" } else { "false" });
+    uart::write_str("/");
+    uart::write_u64_dec(unsafe { FETCH_DEBUG_POST_STATE_HTTPS_BYTE as u64 });
+    uart::write_str(" post_state_path_len=");
+    uart::write_u64_dec(unsafe { FETCH_DEBUG_POST_STATE_PATH_LEN as u64 });
+    uart::write_str("\n");
+    uart::write_str("fetch dbg synack_https=");
+    uart::write_str(if unsafe { FETCH_DEBUG_SYNACK_HTTPS } { "true" } else { "false" });
+    uart::write_str(" synack_path_len=");
+    uart::write_u64_dec(unsafe { FETCH_DEBUG_SYNACK_PATH_LEN as u64 });
+    uart::write_str("\n");
+    uart::write_str("fetch dbg final_https=");
+    uart::write_str(if unsafe { FETCH_DEBUG_FINAL_HTTPS } { "true" } else { "false" });
+    uart::write_str("/");
+    uart::write_u64_dec(unsafe { FETCH_DEBUG_FINAL_HTTPS_BYTE as u64 });
+    uart::write_str(" last_rounds_set=");
+    uart::write_u64_dec(unsafe { FETCH_DEBUG_LAST_ROUNDS_SET as u64 });
+    uart::write_str("\n");
+    uart::write_str("fetch raw agent_mode=");
+    uart::write_u64_hex(agent_mode_raw() as u64);
+    uart::write_str(" agent_phase=");
+    uart::write_u64_hex(agent_phase_raw() as u64);
+    uart::write_str(" https_byte=");
+    uart::write_u64_hex(fetch_https_byte_raw() as u64);
+    uart::write_str(" proxy_byte=");
+    uart::write_u64_hex(fetch_proxy_raw() as u64);
+    uart::write_str(" retry_byte=");
+    uart::write_u64_hex(fetch_retry_raw() as u64);
+    uart::write_str(" state_byte=");
+    uart::write_u64_hex(fetch_state_raw() as u64);
+    uart::write_str("\n");
+}
+
+fn trace_tls_export_if_any() {
+    let count = tls::export_count();
+    if count == 0 {
+        return;
+    }
+    agent::trace_tls_export(
+        count,
+        tls::export_client_random_prefix(),
+        tls::export_server_random_prefix(),
+        tls::export_client_random_hash(),
+        tls::export_server_random_hash(),
+        tls::export_master_hash(),
+        tls::export_keyblock_hash(),
+        tls::export_client_write_mac_hash(),
+        tls::export_client_write_key_hash(),
+        tls::export_client_write_key_prefix(),
+        tls::export_server_write_key_hash(),
+        tls::export_client_write_key_aes_zero_hash(),
+        tls::export_client_write_key_aes_zero_hash_static(),
+        tls::aes256_zero_key_self_hash(),
+        tls::export_maclen(),
+        tls::export_keylen(),
+        tls::export_ivlen(),
+        tls::export_prf_type(),
+        tls::in_ctr(),
+        tls::cur_out_ctr(),
+        tls::has_transform_out(),
+    );
+}
+
+fn trace_tls_cipher_diag_if_any() {
+    let ciphersuite = tls::active_ciphersuite();
+    if ciphersuite == 0 {
+        return;
+    }
+    agent::trace_tls_cipher_diag(
+        ciphersuite,
+        tls::active_cipher_type(),
+        tls::active_cipher_mode(),
+        tls::active_cipher_operation(),
+        tls::active_cipher_key_bitlen(),
+        tls::active_iv_enc_prefix(),
+        tls::active_iv_enc_hash(),
+        tls::active_cipher_ctx_enc_aes_zero_hash(),
+    );
+}
+
+fn trace_tls_record_diag_if_any() {
+    agent::trace_tls_record_diag(
+        tls::last_out_record_decrypt_ok(),
+        tls::last_out_record_plaintext_hash(),
+        tls::last_out_record_plaintext_len(),
+        tls::last_out_record_padlen(),
+    );
+}
+
+fn trace_tls_cbc_diag_if_any() {
+    agent::trace_tls_cbc_diag(
+        tls::last_cbc_reencrypt_match(),
+        tls::last_cbc_plain_hash(),
+        tls::last_cbc_expected_cipher_hash(),
+        tls::last_cbc_actual_cipher_hash(),
+        tls::last_cbc_len(),
+    );
+}
+
+fn trace_tls_mac_diag_if_any() {
+    agent::trace_tls_mac_diag(
+        tls::last_mac_match(),
+        tls::last_expected_mac_hash(),
+        tls::last_actual_mac_hash(),
+    );
 }
 
 fn fetch_close_current_transport() {
@@ -3141,6 +4086,8 @@ fn fetch_close_current_transport() {
             return;
         }
         if NET_IFACE_READY {
+            fetch_try_tls_close_notify();
+            let (seq, ack) = fetch_current_close_seq_ack();
             net::send_tcp(
                 NET_IFACE_NB,
                 NET_IFACE_MAC,
@@ -3149,8 +4096,8 @@ fn fetch_close_current_transport() {
                 FETCH_GW_MAC,
                 FETCH_DST_IP,
                 FETCH_DST_PORT,
-                FETCH_SEQ,
-                FETCH_ACK,
+                seq,
+                ack,
                 0x14,
                 &[],
             );
@@ -3181,7 +4128,7 @@ pub(crate) fn fetch_prepare_openai_transport() {
 
 fn fetch_best_effort_close(nb: usize, mac: [u8; 6]) {
     unsafe {
-        if FETCH_PROXY || FETCH_HTTPS {
+        if FETCH_PROXY || fetch_https_raw() {
             let now = timer::ticks_to_ms(timer::counter_ticks(), timer::counter_freq_hz());
             let until = now.saturating_add(FETCH_TRANSPORT_SUCCESS_COOLDOWN_MS);
             if until > FETCH_TRANSPORT_COOLDOWN_UNTIL_MS {
@@ -3201,6 +4148,8 @@ fn fetch_best_effort_close(nb: usize, mac: [u8; 6]) {
             FETCH_PEER_CLOSED = false;
             return;
         }
+        fetch_try_tls_close_notify();
+        let (seq, ack) = fetch_current_close_seq_ack();
         net::send_tcp(
             nb,
             mac,
@@ -3209,8 +4158,8 @@ fn fetch_best_effort_close(nb: usize, mac: [u8; 6]) {
             FETCH_GW_MAC,
             FETCH_DST_IP,
             FETCH_DST_PORT,
-            FETCH_SEQ,
-            FETCH_ACK,
+            seq,
+            ack,
             0x14,
             &[],
         );
@@ -3235,6 +4184,69 @@ fn fetch_state_name(state: u8) -> &'static [u8] {
         FETCH_SOCKS_CONNECT => b"proxy_connect",
         _ => b"unknown",
     }
+}
+
+fn fetch_state_raw() -> u8 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(FETCH_STATE)) }
+}
+
+fn fetch_https_raw() -> bool {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(FETCH_HTTPS)) }
+}
+
+fn fetch_set_https(value: bool) {
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(FETCH_HTTPS), value) }
+}
+
+fn fetch_rounds_raw() -> u8 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(FETCH_ROUNDS)) }
+}
+
+fn fetch_set_rounds(value: u8) {
+    unsafe {
+        FETCH_DEBUG_LAST_ROUNDS_SET = value;
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(FETCH_ROUNDS), value);
+    }
+}
+
+fn fetch_next_ms_raw() -> u64 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(FETCH_NEXT_MS)) }
+}
+
+fn fetch_domain_len_raw() -> usize {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(FETCH_DOMAIN_LEN)) }
+}
+
+fn fetch_set_domain_len(value: usize) {
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(FETCH_DOMAIN_LEN), value) }
+}
+
+fn fetch_path_len_raw() -> usize {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(FETCH_PATH_LEN)) }
+}
+
+fn fetch_set_path_len(value: usize) {
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(FETCH_PATH_LEN), value) }
+}
+
+fn agent_mode_raw() -> u8 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(AGENT_MODE)) }
+}
+
+fn agent_phase_raw() -> u8 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(AGENT_PHASE)) }
+}
+
+fn fetch_retry_raw() -> u8 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(FETCH_RETRY)) }
+}
+
+fn fetch_proxy_raw() -> u8 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(FETCH_PROXY)) as u8 }
+}
+
+fn fetch_https_byte_raw() -> u8 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(FETCH_HTTPS).cast::<u8>()) }
 }
 
 fn fetch_trace_phase_if_needed() {
@@ -3509,7 +4521,9 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                 uart_prompt();
                 unsafe { UART_PROMPT = true; }
             }
-            if AUTO_FETCH {
+            if AUTO_TLS_LOCAL_FETCH {
+                let _ = start_tls_local_fetch();
+            } else if AUTO_FETCH {
                 let _ = fetch_start(AUTO_DOMAIN, AUTO_PATH, [10, 0, 2, 15], [0, 0, 0, 0], 0, false);
             }
             loop {
@@ -3560,7 +4574,8 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                 let dns_buf = unsafe { &mut DNS_BUF };
                                 let n = net::rx_copy(payload_addr, payload_len, dns_buf);
                                 if let Some(ip) = dns_parse_response(dns_buf, n, 0x1234) {
-                                    let domain = unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] };
+                                    let domain_len = fetch_domain_len_raw();
+                                    let domain = unsafe { &FETCH_DOMAIN[..domain_len] };
                                     dns_cache_store(domain, ip);
                                     unsafe {
                                         FETCH_DST_IP = ip;
@@ -3629,6 +4644,10 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                             if src_ip2 == unsafe { FETCH_DST_IP } && s_port == unsafe { FETCH_DST_PORT } && d_port == unsafe { FETCH_TCP_SRC_PORT } {
                                 if (flags & 0x12) == 0x12 {
                                     unsafe {
+                                        FETCH_DEBUG_SYNACK_HTTPS = fetch_https_raw();
+                                        FETCH_DEBUG_SYNACK_PATH_LEN = fetch_path_len_raw();
+                                    }
+                                    unsafe {
                                         FETCH_ACK = s_seq.wrapping_add(1);
                                         FETCH_SEQ = FETCH_SEQ.wrapping_add(1);
                                     }
@@ -3668,7 +4687,7 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                                 FETCH_NEXT_MS = now_ms + 50;
                                                 FETCH_SOCKS_SENT = false;
                                             }
-                                        } else if unsafe { FETCH_HTTPS } {
+                                        } else if fetch_https_raw() {
                                             let ok = tls::configure(
                                                 nb,
                                                 mac,
@@ -3679,7 +4698,21 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                                 unsafe { FETCH_DST_PORT },
                                                 unsafe { FETCH_SEQ },
                                                 unsafe { FETCH_ACK },
-                                                unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] },
+                                                {
+                                                    let domain_len = fetch_domain_len_raw();
+                                                    unsafe { &FETCH_DOMAIN[..domain_len] }
+                                                },
+                                            );
+                                            let tls_state = tls::state();
+                                            agent::trace_tls_config(
+                                                tls::last_reset_ret(),
+                                                tls::last_hostname_ret(),
+                                                tls_state,
+                                                tls::state_label(tls_state),
+                                                tls::in_ctr(),
+                                                tls::cur_out_ctr(),
+                                                tls::has_transform_out(),
+                                                tls::aes256_zero_key_self_hash(),
                                             );
                                             if !ok {
                                                 set_fetch_error_reason(b"tls configure failed");
@@ -3704,7 +4737,7 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                                 FETCH_NEXT_MS = now_ms + 50;
                                                 FETCH_SOCKS_SENT = false;
                                             }
-                                        } else if unsafe { FETCH_HTTPS } {
+                                        } else if fetch_https_raw() {
                                             let ok = tls::configure(
                                                 nb,
                                                 mac,
@@ -3715,7 +4748,21 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                                 unsafe { FETCH_DST_PORT },
                                                 unsafe { FETCH_SEQ },
                                                 unsafe { FETCH_ACK },
-                                                unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] },
+                                                {
+                                                    let domain_len = fetch_domain_len_raw();
+                                                    unsafe { &FETCH_DOMAIN[..domain_len] }
+                                                },
+                                            );
+                                            let tls_state = tls::state();
+                                            agent::trace_tls_config(
+                                                tls::last_reset_ret(),
+                                                tls::last_hostname_ret(),
+                                                tls_state,
+                                                tls::state_label(tls_state),
+                                                tls::in_ctr(),
+                                                tls::cur_out_ctr(),
+                                                tls::has_transform_out(),
+                                                tls::aes256_zero_key_self_hash(),
                                             );
                                             if !ok {
                                                 set_fetch_error_reason(b"tls configure failed");
@@ -3787,7 +4834,7 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                         &[],
                                     );
                                     if v == 0x05 && r == 0x00 {
-                                        if unsafe { FETCH_HTTPS } {
+                                        if fetch_https_raw() {
                                             let ok = tls::configure(
                                                 nb,
                                                 mac,
@@ -3798,7 +4845,21 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                                 unsafe { FETCH_DST_PORT },
                                                 unsafe { FETCH_SEQ },
                                                 unsafe { FETCH_ACK },
-                                                unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] },
+                                                {
+                                                    let domain_len = fetch_domain_len_raw();
+                                                    unsafe { &FETCH_DOMAIN[..domain_len] }
+                                                },
+                                            );
+                                            let tls_state = tls::state();
+                                            agent::trace_tls_config(
+                                                tls::last_reset_ret(),
+                                                tls::last_hostname_ret(),
+                                                tls_state,
+                                                tls::state_label(tls_state),
+                                                tls::in_ctr(),
+                                                tls::cur_out_ctr(),
+                                                tls::has_transform_out(),
+                                                tls::aes256_zero_key_self_hash(),
                                             );
                                             if !ok {
                                                 set_fetch_error_reason(b"tls configure failed");
@@ -3840,24 +4901,42 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                 uart::write_str("\n");
                             }
                             if src_ip2 == unsafe { FETCH_DST_IP } && s_port == unsafe { FETCH_DST_PORT } && d_port == unsafe { FETCH_TCP_SRC_PORT } {
+                                let expected_ack = unsafe { FETCH_ACK };
+                                let mut new_payload_addr = p_addr;
+                                let mut new_payload_len = p_len;
                                 if p_len > 0 {
+                                    let seq_cmp = tcp_seq_cmp(s_seq, expected_ack);
+                                    if seq_cmp > 0 {
+                                        new_payload_len = 0;
+                                    } else if seq_cmp < 0 {
+                                        let overlap = expected_ack.wrapping_sub(s_seq) as usize;
+                                        if overlap >= p_len {
+                                            new_payload_len = 0;
+                                        } else {
+                                            new_payload_addr += overlap;
+                                            new_payload_len -= overlap;
+                                        }
+                                    }
                                     let mut offset = 0usize;
-                                    while offset < p_len {
+                                    while offset < new_payload_len {
                                         let mut buf = [0u8; FETCH_CHUNK_BYTES];
-                                        let mut copy_len = p_len - offset;
+                                        let mut copy_len = new_payload_len - offset;
                                         if copy_len > buf.len() {
                                             copy_len = buf.len();
                                         }
                                         let mut k = 0usize;
                                         while k < copy_len {
-                                            buf[k] = unsafe { mmio::read8(p_addr + offset + k) };
+                                            buf[k] = unsafe { mmio::read8(new_payload_addr + offset + k) };
                                             k += 1;
                                         }
                                         http_feed(nb, mac, &buf[..copy_len]);
                                         offset += copy_len;
                                     }
-                                    unsafe {
-                                        FETCH_ACK = s_seq.wrapping_add(p_len as u32);
+                                    if new_payload_len != 0 {
+                                        unsafe {
+                                            FETCH_ACK =
+                                                s_seq.wrapping_add(p_len as u32);
+                                        }
                                     }
                                     net::send_tcp(
                                         nb,
@@ -3866,7 +4945,7 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                         unsafe { FETCH_TCP_SRC_PORT },
                                         unsafe { FETCH_GW_MAC },
                                         unsafe { FETCH_DST_IP },
-                                        80,
+                                        unsafe { FETCH_DST_PORT },
                                         unsafe { FETCH_SEQ },
                                         unsafe { FETCH_ACK },
                                         0x10,
@@ -3875,7 +4954,10 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                 }
                                 if (flags & 0x01) != 0 {
                                     unsafe {
-                                        FETCH_ACK = s_seq.wrapping_add(1);
+                                        let fin_ack = s_seq.wrapping_add(p_len as u32).wrapping_add(1);
+                                        if tcp_seq_cmp(fin_ack, FETCH_ACK) > 0 {
+                                            FETCH_ACK = fin_ack;
+                                        }
                                     }
                                     net::send_tcp(
                                         nb,
@@ -3884,7 +4966,7 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                         unsafe { FETCH_TCP_SRC_PORT },
                                         unsafe { FETCH_GW_MAC },
                                         unsafe { FETCH_DST_IP },
-                                        80,
+                                        unsafe { FETCH_DST_PORT },
                                         unsafe { FETCH_SEQ },
                                         unsafe { FETCH_ACK },
                                         0x10,
@@ -4349,7 +5431,8 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                 fetch_trace_phase_if_needed();
                 if unsafe { FETCH_REPLY_PENDING && !FETCH_REPLY_SENT } {
                     let reply_buf = unsafe { &mut UDP_REPLY_BUF };
-                    let domain = unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] };
+                    let domain_len = fetch_domain_len_raw();
+                    let domain = unsafe { &FETCH_DOMAIN[..domain_len] };
                     let src_ip = unsafe { FETCH_REPLY_IP };
                     let src_port = unsafe { FETCH_SRC_PORT };
                     if src_port != 0 {
@@ -4404,7 +5487,8 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                 if unsafe { FETCH_STATE } == FETCH_DONE {
                     fetch_best_effort_close(nb, mac);
                     let reply_buf = unsafe { &mut UDP_REPLY_BUF };
-                    let domain = unsafe { &FETCH_DOMAIN[..FETCH_DOMAIN_LEN] };
+                    let domain_len = fetch_domain_len_raw();
+                    let domain = unsafe { &FETCH_DOMAIN[..domain_len] };
                     let src_ip = unsafe { FETCH_REPLY_IP };
                     let src_port = unsafe { FETCH_SRC_PORT };
                     let ok = unsafe { FETCH_GOT_RESP };
@@ -4522,8 +5606,15 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    uart::write_str("panic\n");
+fn panic(info: &PanicInfo) -> ! {
+    uart::write_str("panic");
+    if let Some(loc) = info.location() {
+        uart::write_str(" ");
+        uart::write_str(loc.file());
+        uart::write_str(":");
+        uart::write_u64_dec(loc.line() as u64);
+    }
+    uart::write_str("\n");
     loop {
         unsafe { core::arch::asm!("wfe"); }
     }

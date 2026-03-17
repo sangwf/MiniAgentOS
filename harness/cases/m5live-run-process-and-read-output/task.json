@@ -1,0 +1,61 @@
+{
+  "goal_id": "m5live-run-process-and-read-output",
+  "goal": "Validate a real QEMU-backed M5 process run through the runtime host bridge and live OpenAI.",
+  "requires_guest_openai": true,
+  "input_mode": "text_line",
+  "input_payload": "Use run_process on hello.py in the workspace, then use read_process_output, and tell me exactly what stdout says. Do not infer from the source code.",
+  "fixture": {
+    "source_asset": "source.md",
+    "workspace_asset": "workspace"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 180,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_completed"
+    ],
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "hello from MiniAgentOS M5 live"
+    ],
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "run_process"
+      },
+      {
+        "event": "tool_call_requested",
+        "tool": "read_process_output"
+      }
+    ],
+    "process_runs_required": true,
+    "process_run_count": 1,
+    "expected_process_runs": [
+      {
+        "argv": [
+          "python3",
+          "hello.py"
+        ],
+        "status": "exited",
+        "exit_code": 0
+      }
+    ],
+    "workspace_files_after": {
+      "hello.py": "print(\"hello from MiniAgentOS M5 live\")\n"
+    },
+    "max_tool_calls": 4
+  }
+}

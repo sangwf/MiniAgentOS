@@ -1,0 +1,60 @@
+{
+  "goal_id": "m5-deny-inline-python",
+  "goal": "Refuse a disallowed inline Python execution request.",
+  "input_mode": "text_line",
+  "input_payload": "Run inline python with -c and tell me whether it is allowed.",
+  "fixture": {
+    "source_asset": "source.md",
+    "workspace_asset": "workspace"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 30,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_refused"
+    ],
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "reason"
+    ],
+    "terminal_status": "refused",
+    "terminal_reason_must_include": [
+      "python3 -c is not allowed"
+    ],
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "run_process"
+      },
+      {
+        "event": "tool_call_completed",
+        "tool": "run_process",
+        "status": "denied"
+      }
+    ],
+    "tool_errors_required": true,
+    "tool_error_count": 1,
+    "expected_tool_errors": [
+      {
+        "code": "policy_denied",
+        "message": "python3 -c is not allowed",
+        "argv": [
+          "python3",
+          "-c",
+          "print(42)"
+        ]
+      }
+    ],
+    "process_run_count": 0,
+    "max_tool_calls": 1
+  }
+}

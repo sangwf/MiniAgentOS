@@ -6,9 +6,12 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from harness.lib.evaluator import evaluate_case
@@ -75,6 +78,26 @@ def _write_json(path: Path, payload):
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _snapshot_workspace(root: Path):
+    entries: dict[str, dict] = {}
+    if not root.exists():
+        return {"entries": entries}
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if path.is_dir():
+            entries[rel] = {"kind": "dir"}
+            continue
+        entry = {"kind": "file", "size": path.stat().st_size}
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            content = None
+        if content is not None and len(content.encode("utf-8")) <= 32768:
+            entry["content"] = content
+        entries[rel] = entry
+    return {"entries": entries}
+
+
 def _redact_uart_artifacts(uart_text: str, uart_raw: bytes, secrets: list[str]):
     redacted_text = uart_text
     redacted_raw = uart_raw
@@ -116,7 +139,23 @@ def _launch_env(config_data: dict):
     current_path = env.get("PATH", "")
     if prefixes:
         env["PATH"] = os.pathsep.join(prefixes + ([current_path] if current_path else []))
+    for key, value in config_data.get("env", {}).items():
+        env[str(key)] = str(value)
     return env
+
+
+def _wait_for_http_ok(url: str, timeout_sec: float) -> None:
+    deadline = time.time() + timeout_sec
+    last_error = None
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.0) as response:
+                if 200 <= response.status < 300:
+                    return
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+        time.sleep(0.1)
+    raise RuntimeError(f"timed out waiting for {url}: {last_error}")
 
 
 def _terminal_status(trace_events):
@@ -265,6 +304,20 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
     source_path = case_dir / source_asset
     source_content = source_path.read_text(encoding="utf-8")
 
+    workspace_root = None
+    workspace_before = None
+    workspace_asset = case_data.get("fixture", {}).get("workspace_asset")
+    if workspace_asset:
+        workspace_source = case_dir / workspace_asset
+        if not workspace_source.exists() or not workspace_source.is_dir():
+            raise ValueError("case fixture.workspace_asset must point to a directory")
+        workspace_root = output_dir / "workspace"
+        if workspace_root.exists():
+            shutil.rmtree(workspace_root)
+        shutil.copytree(workspace_source, workspace_root)
+        workspace_before = _snapshot_workspace(workspace_root)
+        _write_json(output_dir / "workspace_before.json", workspace_before)
+
     sink_cfg = config_data["result_sink"]
     sink_server, sink_state, _ = start_result_sink(
         sink_cfg["bind_host"],
@@ -352,6 +405,39 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
             path=interpretation_cfg.get("error_path", interpretation_cfg["path"] + "-error"),
         )
 
+    bridge_proc = None
+    bridge_log = None
+    bridge_cfg = config_data.get("m5_bridge")
+    if bridge_cfg and workspace_root is not None:
+        bridge_bind_host = str(bridge_cfg.get("bind_host", "127.0.0.1"))
+        bridge_port = int(bridge_cfg.get("port", 8090))
+        bridge_launch_env = _launch_env(config_data)
+        bridge_log = open(output_dir / "m5_bridge.log", "wb")
+        bridge_command = [
+            bridge_launch_env.get("PYTHON", "python3"),
+            str(root / "tools" / "m5_host_bridge.py"),
+            "--workspace",
+            str(workspace_root),
+            "--bind",
+            bridge_bind_host,
+            "--port",
+            str(bridge_port),
+            "--python-image",
+            config_data.get("docker_image", "python:3.12-slim"),
+            "--output-dir",
+            str(output_dir),
+        ]
+        bridge_proc = subprocess.Popen(
+            bridge_command,
+            cwd=root,
+            env=bridge_launch_env,
+            stdout=bridge_log,
+            stderr=subprocess.STDOUT,
+            text=False,
+            bufsize=0,
+        )
+        _wait_for_http_ok(f"http://{bridge_bind_host}:{bridge_port}/healthz", 10.0)
+
     sink_agent_url = "http://{host}:{port}{path}".format(
         host=sink_cfg["agent_host"],
         port=sink_server.server.server_port,
@@ -415,6 +501,7 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         "agent_command": config_data["agent_command"],
         "path_prefixes": config_data.get("path_prefixes", []),
         "input_lines": input_lines,
+        "workspace_root": str(workspace_root) if workspace_root else None,
     }
     pre_input_lines: list[str] = []
     pre_input_lines.append("status plain")
@@ -436,6 +523,10 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
     launch_env = _launch_env(config_data)
     for key, value in replacements.items():
         launch_env[f"HARNESS_{key}"] = value
+    launch_env["HARNESS_OUTPUT_DIR"] = str(output_dir)
+    launch_env["HARNESS_DOCKER_IMAGE"] = config_data.get("docker_image", "python:3.12-slim")
+    if workspace_root is not None:
+        launch_env["HARNESS_WORKSPACE_ROOT"] = str(workspace_root)
     proc = subprocess.Popen(
         command,
         cwd=workdir,
@@ -691,6 +782,16 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
             interpretation_server.stop()
         if x_server is not None:
             x_server.stop()
+        if bridge_proc is not None:
+            if bridge_proc.poll() is None:
+                bridge_proc.terminate()
+                try:
+                    bridge_proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    bridge_proc.kill()
+                    bridge_proc.wait(timeout=2)
+            if bridge_log is not None:
+                bridge_log.close()
 
     uart_raw = b"".join(raw_chunks)
     uart_text = "".join(log_chunks)
@@ -748,6 +849,20 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
     if session_transcript:
         _write_json(output_dir / "session_transcript.json", session_transcript)
 
+    workspace_after = None
+    if workspace_root is not None:
+        workspace_after = _snapshot_workspace(workspace_root)
+        _write_json(output_dir / "workspace_after.json", workspace_after)
+
+    process_runs = []
+    process_runs_path = output_dir / "process_runs.json"
+    if process_runs_path.exists():
+        process_runs = _load_json(process_runs_path)
+    tool_errors = []
+    tool_errors_path = output_dir / "tool_errors.json"
+    if tool_errors_path.exists():
+        tool_errors = _load_json(tool_errors_path)
+
     observations = {
         "sink_requests": len(sink_state.requests),
         "source_requests": len(source_state.requests),
@@ -778,6 +893,10 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         intent_ir=intent_ir,
         session_transcript=session_transcript,
         tool_calls=tool_calls,
+        workspace_before=workspace_before,
+        workspace_after=workspace_after,
+        process_runs=process_runs,
+        tool_errors=tool_errors,
     )
     _write_json(output_dir / "report.json", report)
     return 0 if report["pass"] else 1

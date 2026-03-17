@@ -1,0 +1,55 @@
+{
+  "goal_id": "m5-deny-workspace-escape",
+  "goal": "Refuse a workspace read that tries to escape the bounded root.",
+  "input_mode": "text_line",
+  "input_payload": "Read ../outside.txt and tell me what it says.",
+  "fixture": {
+    "source_asset": "source.md",
+    "workspace_asset": "workspace"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 30,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_refused"
+    ],
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "reason"
+    ],
+    "terminal_status": "refused",
+    "terminal_reason_must_include": [
+      "invalid workspace path"
+    ],
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "read_file"
+      },
+      {
+        "event": "tool_call_completed",
+        "tool": "read_file",
+        "status": "denied"
+      }
+    ],
+    "tool_errors_required": true,
+    "tool_error_count": 1,
+    "expected_tool_errors": [
+      {
+        "code": "invalid_path",
+        "message": "invalid workspace path",
+        "path": "../outside.txt"
+      }
+    ],
+    "max_tool_calls": 1
+  }
+}

@@ -1,14 +1,15 @@
 use super::*;
 
-const M4_LOOP_MAX_STEPS: u8 = 4;
+const M4_LOOP_MAX_STEPS: u8 = 12;
 const M4_OPENAI_MAX_RETRIES: u8 = 4;
 const M4_USER_TURN_COOLDOWN_MS: u64 = 3_000;
 const M4_USER_TURN_FAILURE_COOLDOWN_MS: u64 = 10_000;
+const M4_M5_BRIDGE_OPENAI_COOLDOWN_MS: u64 = 900;
 const M4_MODEL_INPUT_LIMIT: usize = 8_192;
 const M4_TOOL_RESULT_LIMIT: usize = 8_192;
 const M4_PROMPT_BUF_LIMIT: usize = 16_384;
 const M4_CURRENT_REQUEST_LIMIT: usize = 1_024;
-const M4_LATEST_TOOL_RESULT_LIMIT: usize = 2_048;
+const M4_LATEST_TOOL_RESULT_LIMIT: usize = 1_024;
 const M4_STATE_SNAPSHOT_LIMIT: usize = 1_536;
 const M4_RECENT_CONVERSATION_LIMIT: usize = 3_072;
 const M4_FETCH_PREVIEW_LIMIT: usize = 900;
@@ -17,7 +18,7 @@ static mut M4_TOOL_NAME: [u8; 32] = [0u8; 32];
 static mut M4_TOOL_NAME_LEN: usize = 0;
 static mut M4_TOOL_ARG1: [u8; 512] = [0u8; 512];
 static mut M4_TOOL_ARG1_LEN: usize = 0;
-static mut M4_TOOL_ARG2: [u8; 768] = [0u8; 768];
+static mut M4_TOOL_ARG2: [u8; 4096] = [0u8; 4096];
 static mut M4_TOOL_ARG2_LEN: usize = 0;
 static mut M4_LOOP_STEP: u8 = 0;
 static mut M4_MODEL_RETRIES: u8 = 0;
@@ -30,6 +31,8 @@ static mut M4_LAST_FETCH_URL: [u8; 512] = [0u8; 512];
 static mut M4_LAST_FETCH_URL_LEN: usize = 0;
 static mut M4_LAST_FETCH_BODY: [u8; M4_TOOL_RESULT_LIMIT] = [0u8; M4_TOOL_RESULT_LIMIT];
 static mut M4_LAST_FETCH_BODY_LEN: usize = 0;
+static mut M4_BRIDGE_BODY_BUF: [u8; 10240] = [0u8; 10240];
+static mut M4_USE_HOST_OPENAI_BRIDGE: bool = false;
 static mut M4_PROMPT_BUF: [u8; M4_PROMPT_BUF_LIMIT] = [0u8; M4_PROMPT_BUF_LIMIT];
 static mut M4_MODEL_TEXT_BUF: [u8; 16384] = [0u8; 16384];
 
@@ -164,6 +167,62 @@ fn json_extract_string_partial_local(buf: &[u8], key: &[u8], out: &mut [u8]) -> 
     0
 }
 
+fn json_has_key_local(buf: &[u8], key: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + key.len() + 2 < buf.len() {
+        if buf[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let mut matched = true;
+        let mut j = 0usize;
+        while j < key.len() {
+            if i + 1 + j >= buf.len() || buf[i + 1 + j] != key[j] {
+                matched = false;
+                break;
+            }
+            j += 1;
+        }
+        if matched && i + 1 + key.len() < buf.len() && buf[i + 1 + key.len()] == b'"' {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn json_string_key_is_explicitly_empty(buf: &[u8], key: &[u8]) -> bool {
+    let len = buf.len();
+    let mut off = match json_find_key(buf, len, key) {
+        Some(v) => v,
+        None => return false,
+    };
+    while off < len && is_space(buf[off]) {
+        off += 1;
+    }
+    if off >= len || buf[off] != b'"' {
+        return false;
+    }
+    off += 1;
+    off < len && buf[off] == b'"'
+}
+
+fn is_supported_m4_tool_name(tool: &[u8], tool_len: usize) -> bool {
+    starts_with(tool, tool_len, b"fetch_url")
+        || starts_with(tool, tool_len, b"post_url")
+        || starts_with(tool, tool_len, b"post_tweet")
+        || starts_with(tool, tool_len, b"search_recent_posts")
+        || starts_with(tool, tool_len, b"get_user_posts")
+        || starts_with(tool, tool_len, b"read_session_state")
+        || starts_with(tool, tool_len, b"write_session_state")
+        || starts_with(tool, tool_len, b"list_workspace")
+        || starts_with(tool, tool_len, b"read_file")
+        || starts_with(tool, tool_len, b"write_file")
+        || starts_with(tool, tool_len, b"apply_patch")
+        || starts_with(tool, tool_len, b"run_process")
+        || starts_with(tool, tool_len, b"read_process_output")
+}
+
 fn utf8_safe_suffix_start(buf: &[u8], keep: usize) -> usize {
     if buf.len() <= keep {
         return 0;
@@ -189,6 +248,7 @@ fn m4_reset_turn_state() {
         M4_LOOP_STEP = 0;
         M4_LAST_FETCH_URL_LEN = 0;
         M4_LAST_FETCH_BODY_LEN = 0;
+        M4_USE_HOST_OPENAI_BRIDGE = false;
     }
 }
 
@@ -215,6 +275,19 @@ fn m4_apply_openai_cooldown(message: &[u8]) {
     unsafe {
         M4_OPENAI_COOLDOWN_UNTIL_MS = 0;
     }
+}
+
+fn m4_schedule_openai_cooldown(ms: u64) {
+    unsafe {
+        let until = m4_now_ms().saturating_add(ms);
+        if until > M4_OPENAI_COOLDOWN_UNTIL_MS {
+            M4_OPENAI_COOLDOWN_UNTIL_MS = until;
+        }
+    }
+}
+
+fn m4_use_host_openai_bridge() -> bool {
+    HOST_OPENAI_BRIDGE_ENABLED || unsafe { M4_USE_HOST_OPENAI_BRIDGE }
 }
 
 fn m4_prepare_openai_attempt(message: &[u8]) {
@@ -337,6 +410,68 @@ fn contains_non_ascii(buf: &[u8]) -> bool {
     false
 }
 
+fn request_mentions_python_or_code_artifact(buf: &[u8], len: usize) -> bool {
+    contains_ascii_phrase(buf, len, b".py")
+        || contains_ascii_phrase(buf, len, b"python")
+        || contains_bytes_phrase(buf, len, "脚本".as_bytes())
+        || contains_bytes_phrase(buf, len, "程序".as_bytes())
+        || contains_bytes_phrase(buf, len, "代码".as_bytes())
+        || contains_bytes_phrase(buf, len, "文件".as_bytes())
+}
+
+fn request_mentions_execution_or_observed_result(buf: &[u8], len: usize) -> bool {
+    contains_ascii_phrase(buf, len, b"run")
+        || contains_ascii_phrase(buf, len, b"execute")
+        || contains_ascii_phrase(buf, len, b"check")
+        || contains_ascii_phrase(buf, len, b"verify")
+        || contains_ascii_phrase(buf, len, b"result")
+        || contains_ascii_phrase(buf, len, b"output")
+        || contains_ascii_phrase(buf, len, b"compute")
+        || contains_bytes_phrase(buf, len, "运行".as_bytes())
+        || contains_bytes_phrase(buf, len, "执行".as_bytes())
+        || contains_bytes_phrase(buf, len, "计算".as_bytes())
+        || contains_bytes_phrase(buf, len, "结果".as_bytes())
+        || contains_bytes_phrase(buf, len, "输出".as_bytes())
+        || contains_bytes_phrase(buf, len, "验证".as_bytes())
+        || contains_bytes_phrase(buf, len, "检查".as_bytes())
+        || contains_bytes_phrase(buf, len, "发给我".as_bytes())
+        || contains_bytes_phrase(buf, len, "告诉我".as_bytes())
+}
+
+fn request_authorizes_bounded_python_execution(buf: &[u8], len: usize) -> bool {
+    request_mentions_python_or_code_artifact(buf, len)
+        && request_mentions_execution_or_observed_result(buf, len)
+}
+
+fn request_prefers_direct_process_output(buf: &[u8], len: usize) -> bool {
+    contains_ascii_phrase(buf, len, b"tell me")
+        || contains_ascii_phrase(buf, len, b"show me")
+        || contains_ascii_phrase(buf, len, b"send me")
+        || contains_ascii_phrase(buf, len, b"return the output")
+        || contains_ascii_phrase(buf, len, b"what it prints")
+        || contains_ascii_phrase(buf, len, b"compute")
+        || contains_ascii_phrase(buf, len, b"result")
+        || contains_ascii_phrase(buf, len, b"output")
+        || contains_bytes_phrase(buf, len, "发给我".as_bytes())
+        || contains_bytes_phrase(buf, len, "告诉我".as_bytes())
+        || contains_bytes_phrase(buf, len, "输出".as_bytes())
+        || contains_bytes_phrase(buf, len, "结果".as_bytes())
+        || contains_bytes_phrase(buf, len, "计算".as_bytes())
+}
+
+fn latest_tool_result_requires_execution_recovery() -> bool {
+    let buf = unsafe { &M4_LAST_TOOL_RESULT[..M4_LAST_TOOL_RESULT_LEN] };
+    let len = unsafe { M4_LAST_TOOL_RESULT_LEN };
+    if len == 0 {
+        return false;
+    }
+    if json_extract_u64(buf, len, b"exit_code").unwrap_or(0) != 0 {
+        return true;
+    }
+    contains_ascii_phrase(buf, len, b"\"status\":\"timed_out\"")
+        || contains_ascii_phrase(buf, len, b"\"ok\":false")
+}
+
 fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -385,12 +520,12 @@ fn build_tool_inventory_response(goal: &[u8], out: &mut [u8]) -> usize {
     if contains_non_ascii(goal) {
         copy_bytes(
             out,
-            "我当前可调用的工具有：fetch_url（抓取一个 URL）、post_url（向允许的端点发送 JSON POST）、post_tweet（发布一条推文）、search_recent_posts（搜索近期推文）、get_user_posts（读取某个账号的近期推文）、read_session_state（读取会话状态）、write_session_state（写入会话状态）。".as_bytes(),
+            "我当前可调用的工具有：fetch_url、post_url、post_tweet、search_recent_posts、get_user_posts、read_session_state、write_session_state、list_workspace、read_file、write_file、apply_patch、run_process、read_process_output。".as_bytes(),
         )
     } else {
         copy_bytes(
             out,
-            b"My callable tools are: fetch_url (fetch one URL), post_url (send one allowed JSON POST), post_tweet (publish one tweet), search_recent_posts (search recent posts), get_user_posts (read one account's recent posts), read_session_state (read session state), and write_session_state (write session state).",
+            b"My callable tools are: fetch_url, post_url, post_tweet, search_recent_posts, get_user_posts, read_session_state, write_session_state, list_workspace, read_file, write_file, apply_patch, run_process, and read_process_output.",
         )
     }
 }
@@ -603,7 +738,7 @@ fn append_bounded_prompt_bytes(
 }
 
 fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
-    const INSTRUCTIONS: &[u8] = b"You are the MiniAgentOS M4 session agent. Available tools: fetch_url(url), post_url(url,json), post_tweet(text), search_recent_posts(query), get_user_posts(username), read_session_state(key), write_session_state(key,value). You must return only compact JSON with no markdown. If you want to call one tool, return one of: {\"type\":\"tool\",\"tool\":\"fetch_url\",\"url\":\"...\"}, {\"type\":\"tool\",\"tool\":\"post_url\",\"url\":\"...\",\"json\":\"{...}\"}, {\"type\":\"tool\",\"tool\":\"post_tweet\",\"text\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_recent_posts\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"get_user_posts\",\"username\":\"...\"}, {\"type\":\"tool\",\"tool\":\"read_session_state\",\"key\":\"...\"}, {\"type\":\"tool\",\"tool\":\"write_session_state\",\"key\":\"...\",\"value\":\"...\"}. If you are done, return {\"type\":\"final\",\"response\":\"...\"}. Use at most one tool call per turn. The Current request section is authoritative and always takes precedence over older conversation. Do not continue a previous completed or failed task unless the current request explicitly asks for follow-up. Keep final responses concise and directly answer the user's request; do not append generic follow-up offers unless the user explicitly asks for options. After fetch_url returns content for a summary request, answer with a final response instead of fetching the same URL again unless the user explicitly asks to refetch. Prefer using the Latest tool result section before refetching. For follow-up questions about prior posts or fetched data, prefer read_session_state. For questions about what a specific person or account posted recently, prefer get_user_posts(username). Use search_recent_posts for topic searches, not account timelines. If the user asks for themes, opinions, or takeaways from posts, summarize the main themes from the tool result instead of listing raw JSON. When a search result will matter later, you may use write_session_state. Use post_url for allowed JSON POST requests. If the user asks something outside the available tools, return a brief final refusal.";
+    const INSTRUCTIONS: &[u8] = b"You are the MiniAgentOS M4/M5 session agent. Available tools: fetch_url(url), post_url(url,json), post_tweet(text), search_recent_posts(query), get_user_posts(username), read_session_state(key), write_session_state(key,value), list_workspace(path), read_file(path), write_file(path,content), apply_patch(patch), run_process(path), read_process_output(process_id). You must return only compact JSON with no markdown. If you want to call one tool, return exactly one compact JSON object such as {\"type\":\"tool\",\"tool\":\"fetch_url\",\"url\":\"...\"}, {\"type\":\"tool\",\"tool\":\"post_url\",\"url\":\"...\",\"json\":\"{...}\"}, {\"type\":\"tool\",\"tool\":\"post_tweet\",\"text\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_recent_posts\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"get_user_posts\",\"username\":\"...\"}, {\"type\":\"tool\",\"tool\":\"read_session_state\",\"key\":\"...\"}, {\"type\":\"tool\",\"tool\":\"write_session_state\",\"key\":\"...\",\"value\":\"...\"}, {\"type\":\"tool\",\"tool\":\"list_workspace\",\"path\":\"\"}, {\"type\":\"tool\",\"tool\":\"read_file\",\"path\":\"hello.py\"}, {\"type\":\"tool\",\"tool\":\"write_file\",\"path\":\"hello.py\",\"content\":\"print(\\\"hi\\\")\\n\"}, {\"type\":\"tool\",\"tool\":\"apply_patch\",\"patch\":\"*** Begin Patch\\n*** Update File: hello.py\\n@@\\n-old\\n+new\\n*** End Patch\"}, {\"type\":\"tool\",\"tool\":\"run_process\",\"path\":\"hello.py\"}, or {\"type\":\"tool\",\"tool\":\"read_process_output\",\"process_id\":\"1\"}. If you are done, return {\"type\":\"final\",\"response\":\"...\"}. Use at most one tool call per turn. The Current request section is authoritative and always takes precedence over older conversation. Keep final responses concise and directly answer the user's request. Tool results are compact JSON; inspect them before deciding the next step. For workspace and process tools, stay inside the bounded workspace, prefer list_workspace/read_file before editing, use apply_patch for targeted edits, use write_file for full-file replacement, use run_process only for bounded Python file execution inside the workspace, and after every run_process your next step must be read_process_output for that process_id before any final response. If the user asks you to fix code, make a check pass, verify a change, confirm behavior, compute a result by running code, or create a file and then run it, you must observe the real process result first, and if the observed exit_code is non-zero you must continue by inspecting or editing and then rerunning until you have observed success; do not stop after editing alone and do not ask for confirmation to run if the Current request already asked you to run, compute, verify, or send the result. When a coding request explicitly includes both writing or editing code and then executing, checking, computing, or reporting its output, writing the file is not sufficient: continue through run_process and read_process_output before any final response. Escape newlines inside JSON strings as \\n. If a tool result contains {\"ok\":false,...}, adjust and continue instead of pretending it succeeded. After fetch_url returns content for a summary request, answer with a final response instead of fetching the same URL again unless the user explicitly asks to refetch. Prefer using the Latest tool result section before refetching. For follow-up questions about prior posts or fetched data, prefer read_session_state. For questions about what a specific person or account posted recently, prefer get_user_posts(username). Use search_recent_posts for topic searches, not account timelines. If the user asks something outside the available tools, return a brief final refusal.";
     let prompt: &mut [u8] = unsafe { &mut M4_PROMPT_BUF[..] };
     let mut prompt_len = 0usize;
     let current_goal = unsafe { &AGENT_GOAL_TEXT[..AGENT_GOAL_TEXT_LEN] };
@@ -617,6 +752,17 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
         b"(empty)",
     );
 
+    if request_authorizes_bounded_python_execution(current_goal, current_goal.len()) {
+        append_prompt_section_header(prompt, &mut prompt_len, b"Execution requirement");
+        append_bounded_prompt_bytes(
+            prompt,
+            &mut prompt_len,
+            b"The current request already authorizes bounded Python execution inside the workspace. If you write or edit a Python file in order to answer this request, you must continue through run_process and read_process_output before any final response. Do not ask for permission again; return the observed result.",
+            384,
+            b"(none)",
+        );
+    }
+
     append_prompt_section_header(prompt, &mut prompt_len, b"Latest tool result");
     unsafe {
         append_bounded_prompt_bytes(
@@ -624,6 +770,17 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
             &mut prompt_len,
             &M4_LAST_TOOL_RESULT[..M4_LAST_TOOL_RESULT_LEN],
             M4_LATEST_TOOL_RESULT_LIMIT,
+            b"(none)",
+        );
+    }
+
+    if latest_tool_result_requires_execution_recovery() {
+        append_prompt_section_header(prompt, &mut prompt_len, b"Execution recovery requirement");
+        append_bounded_prompt_bytes(
+            prompt,
+            &mut prompt_len,
+            b"You just observed a failed bounded process result. Your next response must be exactly one compact JSON tool call that inspects, edits, reruns, or reads process output. Do not return natural-language planning text, apologies, or permission questions while recovery is still required.",
+            384,
             b"(none)",
         );
     }
@@ -671,21 +828,26 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
     idx = json_escape_append(out, idx, &prompt[..prompt_len]);
     idx = copy_bytes(
         &mut out[idx..],
-        b"\",\"reasoning\":{\"effort\":\"minimal\"},\"max_output_tokens\":260}",
+        b"\",\"reasoning\":{\"effort\":\"minimal\"},\"max_output_tokens\":1400}",
     ) + idx;
     idx
 }
 
 fn start_m4_model_turn() -> bool {
-    if !crate::openai::api_key_ready() {
+    if !m4_use_host_openai_bridge() && !crate::openai::api_key_ready() {
         policy::agent_set_result(b"error", b"missing openai key; run openai-key <key> before M4 input");
         skill::agent_finish_local(unsafe { M4_LOOP_STEP }, AGENT_TERMINAL_FAILED);
         return false;
     }
     m4_prepare_openai_attempt(b"thinking...");
     let body_len = unsafe { build_m4_openai_request_body(&mut FETCH_BODY) };
-    let auth_len = unsafe { crate::openai::build_bearer_header(&mut FETCH_EXTRA_HEADER) };
-    if body_len == 0 || auth_len == 0 {
+    let use_bridge = m4_use_host_openai_bridge();
+    let auth_len = if use_bridge {
+        0
+    } else {
+        unsafe { crate::openai::build_bearer_header(&mut FETCH_EXTRA_HEADER) }
+    };
+    if body_len == 0 || (!use_bridge && auth_len == 0) {
         policy::agent_set_result(b"error", b"openai request build failed");
         skill::agent_finish_local(unsafe { M4_LOOP_STEP }, AGENT_TERMINAL_FAILED);
         return false;
@@ -702,8 +864,16 @@ fn start_m4_model_turn() -> bool {
     trace_model_request_built(body_len);
     trace_model_turn_started();
     human_status(b"thinking...");
-    let started =
-        skill::fetch_start_agent_url(crate::openai::responses_url(), [10, 0, 2, 15], [0, 0, 0, 0], 0);
+    let started = if use_bridge {
+        start_m5_bridge_openai_post_current_body(body_len)
+    } else {
+        skill::fetch_start_agent_url(
+            crate::openai::responses_url(),
+            [10, 0, 2, 15],
+            [0, 0, 0, 0],
+            0,
+        )
+    };
     if !started {
         finalize_m4_reason(fetch_failure_reason_or(b"openai loop request failed"));
     }
@@ -713,8 +883,13 @@ fn start_m4_model_turn() -> bool {
 fn start_m4_summary_model_turn() -> bool {
     m4_prepare_openai_attempt(b"summarizing...");
     let body_len = unsafe { model::build_openai_summary_request_body(&mut FETCH_BODY) };
-    let auth_len = unsafe { crate::openai::build_bearer_header(&mut FETCH_EXTRA_HEADER) };
-    if body_len == 0 || auth_len == 0 {
+    let use_bridge = m4_use_host_openai_bridge();
+    let auth_len = if use_bridge {
+        0
+    } else {
+        unsafe { crate::openai::build_bearer_header(&mut FETCH_EXTRA_HEADER) }
+    };
+    if body_len == 0 || (!use_bridge && auth_len == 0) {
         finalize_m4_reason(b"openai summary request build failed");
         return false;
     }
@@ -730,8 +905,16 @@ fn start_m4_summary_model_turn() -> bool {
     trace_model_request_built(body_len);
     trace_model_turn_started();
     human_status(b"summarizing...");
-    let started =
-        skill::fetch_start_agent_url(crate::openai::responses_url(), [10, 0, 2, 15], [0, 0, 0, 0], 0);
+    let started = if use_bridge {
+        start_m5_bridge_openai_post_current_body(body_len)
+    } else {
+        skill::fetch_start_agent_url(
+            crate::openai::responses_url(),
+            [10, 0, 2, 15],
+            [0, 0, 0, 0],
+            0,
+        )
+    };
     if !started {
         finalize_m4_reason(fetch_failure_reason_or(b"openai summary request failed"));
     }
@@ -773,6 +956,49 @@ fn finalize_m4_reason(reason: &[u8]) {
     clear_inline_status();
     trace_loop_stopped(b"error");
     skill::agent_finish_local(unsafe { M4_LOOP_STEP }, AGENT_TERMINAL_FAILED);
+}
+
+fn try_finalize_direct_process_output() -> bool {
+    let current_goal = unsafe { &AGENT_GOAL_TEXT[..AGENT_GOAL_TEXT_LEN] };
+    if !request_prefers_direct_process_output(current_goal, current_goal.len()) {
+        return false;
+    }
+    let result = unsafe { &M4_LAST_TOOL_RESULT[..M4_LAST_TOOL_RESULT_LEN] };
+    let result_len = unsafe { M4_LAST_TOOL_RESULT_LEN };
+    if json_extract_u64(result, result_len, b"exit_code").unwrap_or(1) != 0 {
+        return false;
+    }
+    let mut stdout_buf = [0u8; 1024];
+    let stdout_len = json_extract_string_local(result, b"stdout", &mut stdout_buf);
+    let mut stderr_buf = [0u8; 512];
+    let stderr_len = json_extract_string_local(result, b"stderr", &mut stderr_buf);
+    if stdout_len == 0 && stderr_len == 0 {
+        return false;
+    }
+
+    let mut response = [0u8; 1400];
+    let mut len = 0usize;
+    if contains_non_ascii(current_goal) {
+        len += copy_bytes(&mut response[len..], b"\xe7\xa8\x8b\xe5\xba\x8f\xe8\xbe\x93\xe5\x87\xba\xef\xbc\x9a\n");
+    } else {
+        len += copy_bytes(&mut response[len..], b"Observed process output:\n");
+    }
+    if stdout_len != 0 {
+        len += copy_bytes(&mut response[len..], &stdout_buf[..stdout_len]);
+    }
+    if stderr_len != 0 {
+        if len != 0 && response[len - 1] != b'\n' {
+            len += copy_bytes(&mut response[len..], b"\n");
+        }
+        if contains_non_ascii(current_goal) {
+            len += copy_bytes(&mut response[len..], b"stderr:\n");
+        } else {
+            len += copy_bytes(&mut response[len..], b"stderr:\n");
+        }
+        len += copy_bytes(&mut response[len..], &stderr_buf[..stderr_len]);
+    }
+    finalize_m4_response(&response[..len], false);
+    true
 }
 
 fn execute_sync_tool(tool: &[u8]) -> bool {
@@ -858,6 +1084,15 @@ fn prepare_post_url_body(body: &[u8]) -> bool {
         FETCH_OAUTH_ACTIVE = false;
     }
     true
+}
+
+fn begin_m5_bridge_tool_phase(status: &[u8]) {
+    human_status(status);
+    unsafe {
+        AGENT_PHASE = AGENT_PHASE_M5_BRIDGE_TOOL;
+        AGENT_RESPONSE_BODY_LEN = 0;
+        AGENT_OUTPUT_TEXT_LEN = 0;
+    }
 }
 
 fn execute_async_tool(tool: &[u8]) -> bool {
@@ -991,6 +1226,93 @@ fn execute_async_tool(tool: &[u8]) -> bool {
         }
         return started;
     }
+    if starts_with(tool, tool.len(), b"list_workspace") {
+        trace_tool_call_with_arg(b"tool_call_requested", tool, b"path", arg1);
+        trace_tool_call_with_arg(b"tool_call_started", tool, b"path", arg1);
+        let path_len = unsafe { build_m5_list_path(arg1, &mut M4_PATH_BUF) };
+        begin_m5_bridge_tool_phase(b"listing workspace...");
+        let started = start_m5_bridge_fetch(unsafe { &M4_PATH_BUF[..path_len] });
+        if !started {
+            finalize_m4_reason(fetch_failure_reason_or(b"list_workspace start failed"));
+        }
+        return started;
+    }
+    if starts_with(tool, tool.len(), b"read_file") {
+        trace_tool_call_with_arg(b"tool_call_requested", tool, b"path", arg1);
+        trace_tool_call_with_arg(b"tool_call_started", tool, b"path", arg1);
+        let path_len = unsafe { build_m5_read_path(arg1, &mut M4_PATH_BUF) };
+        begin_m5_bridge_tool_phase(b"reading file...");
+        let started = start_m5_bridge_fetch(unsafe { &M4_PATH_BUF[..path_len] });
+        if !started {
+            finalize_m4_reason(fetch_failure_reason_or(b"read_file start failed"));
+        }
+        return started;
+    }
+    if starts_with(tool, tool.len(), b"write_file") {
+        trace_tool_call_with_two_args(b"tool_call_requested", tool, b"path", arg1, b"content", arg2);
+        trace_tool_call_with_two_args(b"tool_call_started", tool, b"path", arg1, b"content", arg2);
+        let body_len = unsafe { build_m5_write_body(arg1, arg2, &mut M4_BRIDGE_BODY_BUF) };
+        if body_len == 0 {
+            finalize_m4_reason(b"write_file request build failed");
+            return false;
+        }
+        begin_m5_bridge_tool_phase(b"writing file...");
+        let started =
+            start_m5_bridge_post(M5_BRIDGE_WRITE_PATH, unsafe { &M4_BRIDGE_BODY_BUF[..body_len] });
+        if !started {
+            finalize_m4_reason(fetch_failure_reason_or(b"write_file start failed"));
+        }
+        return started;
+    }
+    if starts_with(tool, tool.len(), b"apply_patch") {
+        trace_tool_call_with_arg(b"tool_call_requested", tool, b"patch", arg2);
+        trace_tool_call_with_arg(b"tool_call_started", tool, b"patch", arg2);
+        let body_len = unsafe { build_m5_patch_body(arg2, &mut M4_BRIDGE_BODY_BUF) };
+        if body_len == 0 {
+            finalize_m4_reason(b"apply_patch request build failed");
+            return false;
+        }
+        begin_m5_bridge_tool_phase(b"applying patch...");
+        let started = start_m5_bridge_post(
+            M5_BRIDGE_APPLY_PATCH_PATH,
+            unsafe { &M4_BRIDGE_BODY_BUF[..body_len] },
+        );
+        if !started {
+            finalize_m4_reason(fetch_failure_reason_or(b"apply_patch start failed"));
+        }
+        return started;
+    }
+    if starts_with(tool, tool.len(), b"run_process") {
+        trace_tool_call_with_arg(b"tool_call_requested", tool, b"path", arg1);
+        trace_tool_call_with_arg(b"tool_call_started", tool, b"path", arg1);
+        let body_len = unsafe {
+            build_m5_run_python_body(arg1, M5_PYTHON_RUN_TIMEOUT_SEC, &mut M4_BRIDGE_BODY_BUF)
+        };
+        if body_len == 0 {
+            finalize_m4_reason(b"run_process request build failed");
+            return false;
+        }
+        begin_m5_bridge_tool_phase(b"running process...");
+        let started = start_m5_bridge_post(
+            M5_BRIDGE_RUN_PYTHON_PATH,
+            unsafe { &M4_BRIDGE_BODY_BUF[..body_len] },
+        );
+        if !started {
+            finalize_m4_reason(fetch_failure_reason_or(b"run_process start failed"));
+        }
+        return started;
+    }
+    if starts_with(tool, tool.len(), b"read_process_output") {
+        trace_tool_call_with_arg(b"tool_call_requested", tool, b"process_id", arg1);
+        trace_tool_call_with_arg(b"tool_call_started", tool, b"process_id", arg1);
+        let path_len = unsafe { build_m5_output_path(arg1, &mut M4_PATH_BUF) };
+        begin_m5_bridge_tool_phase(b"reading process output...");
+        let started = start_m5_bridge_fetch(unsafe { &M4_PATH_BUF[..path_len] });
+        if !started {
+            finalize_m4_reason(fetch_failure_reason_or(b"read_process_output start failed"));
+        }
+        return started;
+    }
     false
 }
 
@@ -1070,6 +1392,71 @@ fn parse_m4_tool_from_response(
         );
         return Ok((b"tool", false));
     }
+    if starts_with(tool, tool_len, b"list_workspace") {
+        let path_len = unsafe { json_extract_string_local(response, b"path", &mut M4_TOOL_ARG1) };
+        set_tool_call(tool, unsafe { &M4_TOOL_ARG1[..path_len] }, b"");
+        return Ok((b"tool", false));
+    }
+    if starts_with(tool, tool_len, b"read_file") {
+        let path_len = unsafe { json_extract_string_local(response, b"path", &mut M4_TOOL_ARG1) };
+        if path_len == 0 {
+            return Err(b"missing file path");
+        }
+        set_tool_call(tool, unsafe { &M4_TOOL_ARG1[..path_len] }, b"");
+        return Ok((b"tool", false));
+    }
+    if starts_with(tool, tool_len, b"write_file") {
+        let path_len = unsafe { json_extract_string_local(response, b"path", &mut M4_TOOL_ARG1) };
+        let content_len =
+            unsafe { json_extract_string_local(response, b"content", &mut M4_TOOL_ARG2) };
+        if path_len == 0 {
+            return Err(b"missing file path");
+        }
+        if content_len == 0 {
+            if !json_has_key_local(response, b"content") {
+                return Err(b"missing file content");
+            }
+            if !json_string_key_is_explicitly_empty(response, b"content") {
+                return Err(b"incomplete file content");
+            }
+        }
+        set_tool_call(
+            tool,
+            unsafe { &M4_TOOL_ARG1[..path_len] },
+            unsafe { &M4_TOOL_ARG2[..content_len] },
+        );
+        return Ok((b"tool", false));
+    }
+    if starts_with(tool, tool_len, b"apply_patch") {
+        let patch_len = unsafe { json_extract_string_local(response, b"patch", &mut M4_TOOL_ARG2) };
+        if patch_len == 0 {
+            if !json_has_key_local(response, b"patch") {
+                return Err(b"missing patch");
+            }
+            if !json_string_key_is_explicitly_empty(response, b"patch") {
+                return Err(b"incomplete patch");
+            }
+        }
+        set_tool_call(tool, b"", unsafe { &M4_TOOL_ARG2[..patch_len] });
+        return Ok((b"tool", false));
+    }
+    if starts_with(tool, tool_len, b"run_process") {
+        let path_len = unsafe { json_extract_string_local(response, b"path", &mut M4_TOOL_ARG1) };
+        if path_len == 0 {
+            return Err(b"missing process path");
+        }
+        set_tool_call(tool, unsafe { &M4_TOOL_ARG1[..path_len] }, b"");
+        return Ok((b"tool", false));
+    }
+    if starts_with(tool, tool_len, b"read_process_output") {
+        let process_id_len =
+            unsafe { json_extract_string_local(response, b"process_id", &mut M4_TOOL_ARG1) };
+        if process_id_len == 0 {
+            return Err(b"missing process id");
+        }
+        set_tool_call(tool, unsafe { &M4_TOOL_ARG1[..process_id_len] }, b"");
+        return Ok((b"tool", false));
+    }
     Err(b"unsupported tool")
 }
 
@@ -1084,6 +1471,9 @@ fn parse_m4_final_from_response(response: &[u8]) -> Result<(&'static [u8], bool)
                 M4_LAST_TOOL_RESULT_LEN = partial_len;
             }
         } else {
+            if latest_tool_result_requires_execution_recovery() {
+                return Err(b"non-json final not allowed after failed process result");
+            }
             let trimmed_len = copy_trimmed_text(unsafe { &mut M4_LAST_TOOL_RESULT }, response);
             if trimmed_len == 0 {
                 return Err(b"missing final response");
@@ -1110,38 +1500,75 @@ fn parse_m4_final_from_response(response: &[u8]) -> Result<(&'static [u8], bool)
 fn parse_m4_model_response() -> Result<(&'static [u8], bool), &'static [u8]> {
     let len = match unsafe { super::extract_openai_output_text(&mut M4_MODEL_TEXT_BUF) } {
         Some(v) if v != 0 => v,
-        _ => return Err(b"empty model response"),
+        _ => {
+            let preview_len = core::cmp::min(unsafe { AGENT_RESPONSE_BODY_LEN }, 200);
+            trace_model_output_preview(unsafe { &AGENT_RESPONSE_BODY[..preview_len] });
+            trace_model_parse_error(b"empty model response");
+            return Err(b"empty model response");
+        }
     };
     let response = unsafe { &M4_MODEL_TEXT_BUF[..len] };
-    let mut kind = [0u8; 16];
+    trace_model_output_preview(response);
+    let mut kind = [0u8; 32];
     let kind_len = json_extract_string_local(response, b"type", &mut kind);
     if kind_len != 0 {
         if starts_with(&kind[..], kind_len, b"final") {
             return parse_m4_final_from_response(response);
         }
-        if !starts_with(&kind[..], kind_len, b"tool") {
+        if !starts_with(&kind[..], kind_len, b"tool")
+            && !is_supported_m4_tool_name(&kind[..], kind_len)
+        {
+            trace_model_parse_error(b"unsupported model response");
             return Err(b"unsupported model response");
         }
         let mut tool = [0u8; 32];
-        let tool_len = json_extract_string_local(response, b"tool", &mut tool);
+        let mut tool_len = json_extract_string_local(response, b"tool", &mut tool);
+        if tool_len == 0 && is_supported_m4_tool_name(&kind[..], kind_len) {
+            tool_len = copy_bytes(&mut tool, &kind[..kind_len]);
+        }
         if tool_len == 0 {
+            trace_model_parse_error(b"missing tool");
             return Err(b"missing tool");
         }
-        return parse_m4_tool_from_response(response, &tool[..tool_len], tool_len);
+        return match parse_m4_tool_from_response(response, &tool[..tool_len], tool_len) {
+            Ok(v) => Ok(v),
+            Err(reason) => {
+                trace_model_parse_error(reason);
+                Err(reason)
+            }
+        };
     }
 
     let mut tool = [0u8; 32];
     let tool_len = json_extract_string_local(response, b"tool", &mut tool);
     if tool_len != 0 {
-        return parse_m4_tool_from_response(response, &tool[..tool_len], tool_len);
+        return match parse_m4_tool_from_response(response, &tool[..tool_len], tool_len) {
+            Ok(v) => Ok(v),
+            Err(reason) => {
+                trace_model_parse_error(reason);
+                Err(reason)
+            }
+        };
     }
 
     let mut response_buf = [0u8; 1024];
     if json_extract_string_local(response, b"response", &mut response_buf) != 0 {
-        return parse_m4_final_from_response(response);
+        return match parse_m4_final_from_response(response) {
+            Ok(v) => Ok(v),
+            Err(reason) => {
+                trace_model_parse_error(reason);
+                Err(reason)
+            }
+        };
     }
 
-    parse_m4_final_from_response(response)
+    match parse_m4_final_from_response(response) {
+        Ok(v) => Ok(v),
+        Err(reason) => {
+            trace_model_parse_error(reason);
+            Err(reason)
+        }
+    }
 }
 
 fn complete_tool_and_continue(status: &[u8], auto_store_key: Option<&[u8]>) -> bool {
@@ -1158,6 +1585,9 @@ fn complete_tool_and_continue(status: &[u8], auto_store_key: Option<&[u8]>) -> b
         unsafe { M4_LOOP_STEP = M4_LOOP_STEP.wrapping_add(1); }
         if unsafe { M4_LOOP_STEP } > M4_LOOP_MAX_STEPS {
             finalize_m4_reason(b"m4 loop budget exceeded");
+            return true;
+        }
+        if starts_with(tool, tool.len(), b"read_process_output") && try_finalize_direct_process_output() {
             return true;
         }
         return start_m4_model_turn();
@@ -1299,6 +1729,39 @@ pub(crate) fn handle_m4_fetch_done(ok: bool) -> bool {
         trace_model_turn_completed(b"final_response");
         finalize_m4_response(unsafe { &AGENT_SUMMARY[..AGENT_SUMMARY_LEN] }, false);
         return true;
+    }
+
+    if phase == AGENT_PHASE_M5_BRIDGE_TOOL {
+        if model::agent_response_body_truncated() {
+            unsafe {
+                M4_LAST_TOOL_RESULT_LEN =
+                    copy_bytes(&mut M4_LAST_TOOL_RESULT, b"m5 bridge response body truncated");
+            }
+            return complete_tool_and_continue(b"error", None);
+        }
+        unsafe {
+            M4_LAST_TOOL_RESULT_LEN = capture_raw_response_body();
+            if M4_LAST_TOOL_RESULT_LEN == 0 {
+                M4_LAST_TOOL_RESULT_LEN = copy_bytes(
+                    &mut M4_LAST_TOOL_RESULT,
+                    fetch_failure_reason_or(b"m5 bridge response missing"),
+                );
+            }
+        }
+        if unsafe { M4_LAST_TOOL_RESULT_LEN } != 0 {
+            unsafe {
+                M4_USE_HOST_OPENAI_BRIDGE = true;
+            }
+            m4_schedule_openai_cooldown(M4_M5_BRIDGE_OPENAI_COOLDOWN_MS);
+        }
+        let status: &[u8] = unsafe {
+            if M4_LAST_TOOL_RESULT_LEN == 0 {
+                b"error"
+            } else {
+                b"ok"
+            }
+        };
+        return complete_tool_and_continue(status, None);
     }
 
     let tool = unsafe { &M4_TOOL_NAME[..M4_TOOL_NAME_LEN] };

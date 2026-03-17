@@ -1,6 +1,6 @@
 [build]
 target = "aarch64-virt.json"
-rustflags = ["-C", "link-arg=-Tlinker.ld"]
+rustflags = ["-C", "link-arg=-Tlinker.ld", "-Z", "mutable-noalias=no"]
 
 [target.aarch64-virt]
 runner = "qemu-system-aarch64 -machine virt -cpu cortex-a53 -nographic -kernel"

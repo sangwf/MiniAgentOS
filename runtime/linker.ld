@@ -26,7 +26,7 @@ SECTIONS
   .stack (NOLOAD) : {
     . = ALIGN(16);
     __stack_bottom = .;
-    . = . + 0x4000; /* 16 KiB */
+    . = . + 0x40000; /* 256 KiB: mbedTLS handshake/debug paths exceed the old 16 KiB stack */
     __stack_top = .;
   }
 }

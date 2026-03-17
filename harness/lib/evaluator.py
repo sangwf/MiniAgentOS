@@ -49,6 +49,18 @@ def _contains_expected_event_subset(actual_events, expected_events):
     return False
 
 
+def _workspace_file_content(snapshot, path):
+    if not isinstance(snapshot, dict):
+        return None
+    entries = snapshot.get("entries")
+    if not isinstance(entries, dict):
+        return None
+    entry = entries.get(path)
+    if not isinstance(entry, dict):
+        return None
+    return entry.get("content")
+
+
 def evaluate_case(
     case_data,
     trace_events,
@@ -60,12 +72,18 @@ def evaluate_case(
     intent_ir=None,
     session_transcript=None,
     tool_calls=None,
+    workspace_before=None,
+    workspace_after=None,
+    process_runs=None,
+    tool_errors=None,
 ):
     expect = case_data["expect"]
     failures = []
     observations = observations or {}
     session_transcript = session_transcript or []
     tool_calls = tool_calls or []
+    process_runs = process_runs or []
+    tool_errors = tool_errors or []
 
     guest_exception = observations.get("guest_exception")
     if guest_exception:
@@ -234,6 +252,46 @@ def evaluate_case(
                 f"unexpected request count for {key}: {actual_value} != {expected_value}"
             )
 
+    for path, expected_content in expect.get("workspace_files_before", {}).items():
+        actual_content = _workspace_file_content(workspace_before, path)
+        if actual_content != expected_content:
+            failures.append(
+                f"unexpected workspace_before content for {path}: {actual_content!r} != {expected_content!r}"
+            )
+
+    for path, expected_content in expect.get("workspace_files_after", {}).items():
+        actual_content = _workspace_file_content(workspace_after, path)
+        if actual_content != expected_content:
+            failures.append(
+                f"unexpected workspace_after content for {path}: {actual_content!r} != {expected_content!r}"
+            )
+
+    if expect.get("process_runs_required") and not process_runs:
+        failures.append("process_runs artifact was not captured")
+    expected_process_run_count = expect.get("process_run_count")
+    if expected_process_run_count is not None and len(process_runs) != expected_process_run_count:
+        failures.append(
+            f"unexpected process run count: {len(process_runs)} != {expected_process_run_count}"
+        )
+    expected_process_runs = expect.get("expected_process_runs", [])
+    if expected_process_runs and not _contains_expected_event_subset(
+        process_runs, expected_process_runs
+    ):
+        failures.append("process runs did not include the expected ordered subset")
+
+    if expect.get("tool_errors_required") and not tool_errors:
+        failures.append("tool_errors artifact was not captured")
+    expected_tool_error_count = expect.get("tool_error_count")
+    if expected_tool_error_count is not None and len(tool_errors) != expected_tool_error_count:
+        failures.append(
+            f"unexpected tool error count: {len(tool_errors)} != {expected_tool_error_count}"
+        )
+    expected_tool_errors = expect.get("expected_tool_errors", [])
+    if expected_tool_errors and not _contains_expected_event_subset(
+        tool_errors, expected_tool_errors
+    ):
+        failures.append("tool errors did not include the expected ordered subset")
+
     return {
         "pass": not failures,
         "failures": failures,
@@ -243,4 +301,8 @@ def evaluate_case(
         "intent_ir": intent_ir,
         "session_transcript": session_transcript,
         "tool_calls": tool_calls,
+        "workspace_before": workspace_before,
+        "workspace_after": workspace_after,
+        "process_runs": process_runs,
+        "tool_errors": tool_errors,
     }

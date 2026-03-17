@@ -41,6 +41,20 @@
 #include "mbedtls/oid.h"
 #endif
 
+extern void minios_tls_debug_cbc_pre(
+    const unsigned char *iv,
+    size_t iv_len,
+    const unsigned char *plain,
+    size_t plain_len);
+extern void minios_tls_debug_cbc_post(const unsigned char *cipher, size_t cipher_len);
+extern void minios_tls_debug_mac_check(
+    const unsigned char *add_data,
+    size_t add_data_len,
+    const unsigned char *plain,
+    size_t plain_len,
+    const unsigned char *actual_mac,
+    size_t mac_len);
+
 static uint32_t ssl_get_hs_total_len(mbedtls_ssl_context const *ssl);
 
 /*
@@ -783,6 +797,13 @@ int mbedtls_ssl_encrypt_buf(mbedtls_ssl_context *ssl,
             }
 
             memcpy(data + rec->data_len, mac, transform->maclen);
+            minios_tls_debug_mac_check(
+                add_data,
+                add_data_len,
+                data,
+                rec->data_len,
+                data + rec->data_len,
+                transform->maclen);
 
 hmac_failed_etm_disabled:
             mbedtls_platform_zeroize(mac, transform->maclen);
@@ -990,6 +1011,8 @@ hmac_failed_etm_disabled:
                                   rec->data_len, transform->ivlen,
                                   padlen + 1));
 
+        minios_tls_debug_cbc_pre(transform->iv_enc, transform->ivlen, data, rec->data_len);
+
         if ((ret = mbedtls_cipher_crypt(&transform->cipher_ctx_enc,
                                         transform->iv_enc,
                                         transform->ivlen,
@@ -998,6 +1021,8 @@ hmac_failed_etm_disabled:
             MBEDTLS_SSL_DEBUG_RET(1, "mbedtls_cipher_crypt", ret);
             return ret;
         }
+
+        minios_tls_debug_cbc_post(data, rec->data_len);
 
         if (rec->data_len != olen) {
             MBEDTLS_SSL_DEBUG_MSG(1, ("should never happen"));

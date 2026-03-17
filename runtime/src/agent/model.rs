@@ -13,7 +13,8 @@ pub(crate) fn agent_capture_response_body(data: &[u8]) {
                 || phase == AGENT_PHASE_M4_POST_TWEET
                 || phase == AGENT_PHASE_M4_SEARCH_RECENT
                 || phase == AGENT_PHASE_M4_GET_USER_POSTS
-                || phase == AGENT_PHASE_M4_SUMMARY_MODEL);
+                || phase == AGENT_PHASE_M4_SUMMARY_MODEL
+                || phase == AGENT_PHASE_M5_BRIDGE_TOOL);
         if !capture_phase {
             return;
         }

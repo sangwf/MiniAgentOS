@@ -1,5 +1,5 @@
 CARGO := cargo +nightly
-CARGO_FLAGS := -Z build-std=core,alloc -Z json-target-spec
+CARGO_FLAGS :=
 TARGET := aarch64-virt
 KERNEL := target/$(TARGET)/debug/minios
 DTB := target/virt.dtb

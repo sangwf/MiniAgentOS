@@ -89,7 +89,7 @@ def main():
     parser.add_argument("--config", required=True, help="Harness config path")
     parser.add_argument(
         "--suite",
-        choices=("m1", "m2", "m3", "m4"),
+        choices=("m1", "m2", "m3", "m4", "m5", "m5live"),
         default="m1",
         help="Default suite prefix to use when no explicit cases are provided.",
     )

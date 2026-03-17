@@ -5,11 +5,24 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import re
 import sys
 import time
 import urllib.parse
 import urllib.request
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from harness.lib.m5_substrate import M5Substrate
+
+
+WORKSPACE_ROOT = Path(os.environ["HARNESS_WORKSPACE_ROOT"]).resolve() if os.environ.get("HARNESS_WORKSPACE_ROOT") else None
+OUTPUT_DIR = Path(os.environ["HARNESS_OUTPUT_DIR"]).resolve() if os.environ.get("HARNESS_OUTPUT_DIR") else None
+DOCKER_IMAGE = os.environ.get("HARNESS_DOCKER_IMAGE", "python:3.12-slim")
+M5 = M5Substrate(WORKSPACE_ROOT, OUTPUT_DIR, DOCKER_IMAGE)
 
 
 def emit(event, **extra):
@@ -166,11 +179,136 @@ def render_post_lines(posts: list[dict]) -> list[str]:
 def tool_call(tool: str, arguments: dict, result: dict | None = None, status: str = "ok"):
     emit("tool_call_requested", tool=tool, arguments=arguments)
     emit("tool_call_started", tool=tool, arguments=arguments)
-    payload = {"status": status}
-    if result is not None:
-        payload["result"] = result
     emit("tool_call_completed", tool=tool, arguments=arguments, status=status, result=result or {})
-    return payload
+    return {"status": status, "result": result or {}}
+
+
+def _find_function_name(content: str) -> str | None:
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("def "):
+            return stripped.split("def ", 1)[1].split("(", 1)[0]
+    return None
+
+
+def _handle_m5_turn(prompt: str, text: str) -> str | None:
+    if not M5.available():
+        return None
+    lowered = text.lower().strip()
+
+    if "which function returns the greeting string" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        listing = M5.list_workspace("", depth=3)
+        tool_call("list_workspace", {"path": "", "depth": 3}, listing)
+        readme = M5.read_file("README.md")
+        tool_call("read_file", {"path": "README.md", "offset": 0, "limit": 4096}, readme)
+        app = M5.read_file("src/app.py")
+        tool_call("read_file", {"path": "src/app.py", "offset": 0, "limit": 4096}, app)
+        function_name = _find_function_name(app["content"]) or "unknown"
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- The `{function_name}` function returns the greeting string."])
+        return "ok"
+
+    if "apply a patch to fix the typo" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        file_result = M5.read_file("main.py")
+        tool_call("read_file", {"path": "main.py", "offset": 0, "limit": 4096}, file_result)
+        patch = (
+            "*** Begin Patch\n"
+            "*** Update File: main.py\n"
+            "@@\n"
+            '-print("helo")\n'
+            '+print("hello")\n'
+            "*** End Patch\n"
+        )
+        patch_result = M5.apply_patch(patch)
+        tool_call("apply_patch", {"patch": patch}, patch_result)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, ["- Applied a patch to `main.py` so it now prints `hello`."])
+        return "ok"
+
+    if "fix the typo in the output string" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        file_result = M5.read_file("main.py")
+        tool_call("read_file", {"path": "main.py", "offset": 0, "limit": 4096}, file_result)
+        updated = file_result["content"].replace("helo", "hello")
+        write_result = M5.write_file("main.py", updated)
+        tool_call("write_file", {"path": "main.py", "create": True, "overwrite": True}, write_result)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, ["- Fixed the typo in `main.py` so it now prints `hello`."])
+        return "ok"
+
+    if "run the main python program" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        run_result = M5.run_process(["python3", "main.py"], profile="default")
+        tool_call("run_process", {"argv": ["python3", "main.py"], "cwd": "", "profile": "default", "timeout_sec": 20}, run_result)
+        process_id = run_result["process_id"]
+        output = M5.read_process_output(process_id)
+        tool_call("read_process_output", {"process_id": process_id, "offset": 0, "limit": 8192}, output)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        stdout = output["stdout"].strip() or "(no output)"
+        print_summary(prompt, [f"- `main.py` prints: {stdout}"])
+        return "ok"
+
+    if "run inline python with -c" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        run_result = M5.run_process(["python3", "-c", "print(42)"], profile="default")
+        status = "denied" if not run_result.get("ok") else "ok"
+        tool_call(
+            "run_process",
+            {"argv": ["python3", "-c", "print(42)"], "cwd": "", "profile": "default", "timeout_sec": 20},
+            run_result,
+            status=status,
+        )
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="policy_denied")
+        print_reason(prompt, run_result["error"]["message"])
+        return "policy_denied"
+
+    if "read ../outside.txt" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        read_result = M5.read_file("../outside.txt")
+        status = "denied" if not read_result.get("ok") else "ok"
+        tool_call(
+            "read_file",
+            {"path": "../outside.txt", "offset": 0, "limit": 4096},
+            read_result,
+            status=status,
+        )
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="policy_denied")
+        print_reason(prompt, read_result["error"]["message"])
+        return "policy_denied"
+
+    if "fix the failing regression" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        listing = M5.list_workspace("", depth=3)
+        tool_call("list_workspace", {"path": "", "depth": 3}, listing)
+        app = M5.read_file("app.py")
+        tool_call("read_file", {"path": "app.py", "offset": 0, "limit": 4096}, app)
+        check = M5.read_file("check.py")
+        tool_call("read_file", {"path": "check.py", "offset": 0, "limit": 4096}, check)
+        first_run = M5.run_process(["python3", "check.py"], profile="test")
+        tool_call("run_process", {"argv": ["python3", "check.py"], "cwd": "", "profile": "test", "timeout_sec": 20}, first_run)
+        first_output = M5.read_process_output(first_run["process_id"])
+        tool_call("read_process_output", {"process_id": first_run["process_id"], "offset": 0, "limit": 8192}, first_output)
+        fixed = app["content"].replace("return a - b", "return a + b")
+        write_result = M5.write_file("app.py", fixed)
+        tool_call("write_file", {"path": "app.py", "create": True, "overwrite": True}, write_result)
+        second_run = M5.run_process(["python3", "check.py"], profile="test")
+        tool_call("run_process", {"argv": ["python3", "check.py"], "cwd": "", "profile": "test", "timeout_sec": 20}, second_run)
+        second_output = M5.read_process_output(second_run["process_id"])
+        tool_call("read_process_output", {"process_id": second_run["process_id"], "offset": 0, "limit": 8192}, second_output)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, ["- Fixed the regression in `app.py` and the verification script now passes."])
+        return "ok"
+
+    return None
 
 
 def handle_text_turn(prompt: str, text: str, session_state: dict):
@@ -178,6 +316,14 @@ def handle_text_turn(prompt: str, text: str, session_state: dict):
 
     emit("user_turn_received")
     emit("model_turn_started")
+
+    m5_status = _handle_m5_turn(prompt, text)
+    if m5_status == "ok":
+        emit("goal_completed", status="ok")
+        return
+    if m5_status == "policy_denied":
+        emit("goal_refused", status="refused")
+        return
 
     if "forbidden tool" in lowered or "admin tool" in lowered:
         emit("model_turn_completed", stop_reason="tool_call")

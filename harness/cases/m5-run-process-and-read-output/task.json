@@ -1,0 +1,57 @@
+{
+  "goal_id": "m5-run-process-and-read-output",
+  "goal": "Run a bounded Python process in the workspace and report its output.",
+  "input_mode": "text_line",
+  "input_payload": "Run the main Python program and tell me what it prints.",
+  "fixture": {
+    "source_asset": "source.md",
+    "workspace_asset": "workspace"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 60,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_completed"
+    ],
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "42"
+    ],
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "run_process"
+      },
+      {
+        "event": "tool_call_requested",
+        "tool": "read_process_output"
+      }
+    ],
+    "process_runs_required": true,
+    "process_run_count": 1,
+    "expected_process_runs": [
+      {
+        "argv": [
+          "python3",
+          "main.py"
+        ],
+        "status": "exited",
+        "exit_code": 0
+      }
+    ],
+    "max_tool_calls": 2
+  }
+}

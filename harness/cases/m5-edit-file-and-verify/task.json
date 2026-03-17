@@ -1,0 +1,51 @@
+{
+  "goal_id": "m5-edit-file-and-verify",
+  "goal": "Edit a workspace file and verify the change landed.",
+  "input_mode": "text_line",
+  "input_payload": "Fix the typo in the output string.",
+  "fixture": {
+    "source_asset": "source.md",
+    "workspace_asset": "workspace"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 30,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_completed"
+    ],
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "hello"
+    ],
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "read_file"
+      },
+      {
+        "event": "tool_call_requested",
+        "tool": "write_file"
+      }
+    ],
+    "workspace_files_before": {
+      "main.py": "print(\"helo\")\n"
+    },
+    "workspace_files_after": {
+      "main.py": "print(\"hello\")\n"
+    },
+    "max_tool_calls": 2
+  }
+}

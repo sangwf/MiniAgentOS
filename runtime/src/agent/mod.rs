@@ -87,6 +87,26 @@ fn trace_json_string_field(name: &[u8], value: &[u8]) {
     uart::write_str("\"");
 }
 
+fn trace_json_hex_field(name: &[u8], value: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    if !trace_output_enabled() {
+        return;
+    }
+    uart::write_str(",\"");
+    uart::write_bytes(name);
+    uart::write_str("\":\"");
+    let mut i = 0usize;
+    while i < value.len() {
+        let pair = [
+            HEX[((value[i] >> 4) & 0x0f) as usize],
+            HEX[(value[i] & 0x0f) as usize],
+        ];
+        uart::write_bytes(&pair);
+        i += 1;
+    }
+    uart::write_str("\"");
+}
+
 fn trace_json_u64_field(name: &[u8], value: u64) {
     if !trace_output_enabled() {
         return;
@@ -95,6 +115,21 @@ fn trace_json_u64_field(name: &[u8], value: u64) {
     uart::write_bytes(name);
     uart::write_str("\":");
     uart::write_u64_dec(value);
+}
+
+fn trace_json_i64_field(name: &[u8], value: i64) {
+    if !trace_output_enabled() {
+        return;
+    }
+    uart::write_str(",\"");
+    uart::write_bytes(name);
+    uart::write_str("\":");
+    if value < 0 {
+        uart::write_str("-");
+        uart::write_u64_dec(value.wrapping_neg() as u64);
+    } else {
+        uart::write_u64_dec(value as u64);
+    }
 }
 
 fn trace_json_bool_field(name: &[u8], value: bool) {
@@ -196,6 +231,256 @@ pub(crate) fn trace_fetch_cache_hit(cache: &[u8], subject: &[u8]) {
     trace_begin(b"fetch_cache_hit", current_trace_step());
     trace_json_string_field(b"cache", cache);
     trace_json_string_field(b"subject", subject);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_tls_handshake_failure(
+    ret: i32,
+    x509_err: i32,
+    curve_id: i32,
+    skx_err: i32,
+    skx_ret: i32,
+    verify_flags: u32,
+    state: i32,
+    state_label: &[u8],
+    label: &[u8],
+) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"tls_handshake_failure", current_trace_step());
+    trace_json_i64_field(b"ret", ret as i64);
+    trace_json_i64_field(b"x509_err", x509_err as i64);
+    trace_json_i64_field(b"curve_id", curve_id as i64);
+    trace_json_i64_field(b"skx_err", skx_err as i64);
+    trace_json_i64_field(b"skx_ret", skx_ret as i64);
+    trace_json_u64_field(b"verify_flags", verify_flags as u64);
+    trace_json_i64_field(b"state", state as i64);
+    trace_json_string_field(b"state_label", state_label);
+    trace_json_string_field(b"label", label);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_tls_io_failure(
+    phase: &[u8],
+    ret: i32,
+    verify_flags: u32,
+    pending: bool,
+    state: i32,
+    state_label: &[u8],
+    label: &[u8],
+) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"tls_io_failure", current_trace_step());
+    trace_json_string_field(b"phase", phase);
+    trace_json_i64_field(b"ret", ret as i64);
+    trace_json_u64_field(b"verify_flags", verify_flags as u64);
+    trace_json_bool_field(b"pending", pending);
+    trace_json_i64_field(b"state", state as i64);
+    trace_json_string_field(b"state_label", state_label);
+    trace_json_string_field(b"label", label);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_tls_config(
+    reset_ret: i32,
+    hostname_ret: i32,
+    state: i32,
+    state_label: &[u8],
+    in_ctr: u64,
+    out_ctr: u64,
+    has_transform_out: bool,
+    aes256_zero_key_self_hash: u64,
+) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"tls_config", current_trace_step());
+    trace_json_i64_field(b"reset_ret", reset_ret as i64);
+    trace_json_i64_field(b"hostname_ret", hostname_ret as i64);
+    trace_json_i64_field(b"state", state as i64);
+    trace_json_string_field(b"state_label", state_label);
+    trace_json_u64_field(b"in_ctr", in_ctr);
+    trace_json_u64_field(b"out_ctr", out_ctr);
+    trace_json_bool_field(b"has_transform_out", has_transform_out);
+    trace_json_u64_field(b"aes256_zero_key_self_hash", aes256_zero_key_self_hash);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_tls_close_notify(ret: i32, verify_flags: u32, pending: bool, label: &[u8]) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"tls_close_notify", current_trace_step());
+    trace_json_i64_field(b"ret", ret as i64);
+    trace_json_u64_field(b"verify_flags", verify_flags as u64);
+    trace_json_bool_field(b"pending", pending);
+    trace_json_string_field(b"label", label);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_tls_export(
+    count: u32,
+    client_random_prefix: u64,
+    server_random_prefix: u64,
+    client_random_hash: u64,
+    server_random_hash: u64,
+    master_hash: u64,
+    keyblock_hash: u64,
+    client_write_mac_hash: u64,
+    client_write_key_hash: u64,
+    client_write_key_prefix: u64,
+    server_write_key_hash: u64,
+    client_write_key_aes_zero_hash: u64,
+    client_write_key_aes_zero_hash_static: u64,
+    aes256_zero_key_self_hash: u64,
+    maclen: u32,
+    keylen: u32,
+    ivlen: u32,
+    prf_type: i32,
+    in_ctr: u64,
+    out_ctr: u64,
+    has_transform_out: bool,
+) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"tls_export", current_trace_step());
+    trace_json_u64_field(b"count", count as u64);
+    trace_json_u64_field(b"client_random_prefix", client_random_prefix);
+    trace_json_u64_field(b"server_random_prefix", server_random_prefix);
+    trace_json_u64_field(b"client_random_hash", client_random_hash);
+    trace_json_u64_field(b"server_random_hash", server_random_hash);
+    trace_json_u64_field(b"master_hash", master_hash);
+    trace_json_u64_field(b"keyblock_hash", keyblock_hash);
+    trace_json_u64_field(b"client_write_mac_hash", client_write_mac_hash);
+    trace_json_u64_field(b"client_write_key_hash", client_write_key_hash);
+    trace_json_u64_field(b"client_write_key_prefix", client_write_key_prefix);
+    trace_json_u64_field(b"server_write_key_hash", server_write_key_hash);
+    trace_json_u64_field(
+        b"client_write_key_aes_zero_hash",
+        client_write_key_aes_zero_hash,
+    );
+    trace_json_u64_field(
+        b"client_write_key_aes_zero_hash_static",
+        client_write_key_aes_zero_hash_static,
+    );
+    trace_json_u64_field(b"aes256_zero_key_self_hash", aes256_zero_key_self_hash);
+    trace_json_u64_field(b"maclen", maclen as u64);
+    trace_json_u64_field(b"keylen", keylen as u64);
+    trace_json_u64_field(b"ivlen", ivlen as u64);
+    trace_json_i64_field(b"prf_type", prf_type as i64);
+    trace_json_u64_field(b"in_ctr", in_ctr);
+    trace_json_u64_field(b"out_ctr", out_ctr);
+    trace_json_bool_field(b"has_transform_out", has_transform_out);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_tls_last_tx(state: i32, state_label: &[u8], out_ctr: u64, record: &[u8]) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"tls_last_tx", current_trace_step());
+    trace_json_i64_field(b"state", state as i64);
+    trace_json_string_field(b"state_label", state_label);
+    trace_json_u64_field(b"out_ctr", out_ctr);
+    trace_json_u64_field(b"len", record.len() as u64);
+    trace_json_hex_field(b"record_hex", record);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_tls_cipher_diag(
+    ciphersuite: i32,
+    cipher_type: i32,
+    cipher_mode: i32,
+    cipher_operation: i32,
+    cipher_key_bitlen: u32,
+    iv_enc_prefix: u64,
+    iv_enc_hash: u64,
+    cipher_ctx_enc_aes_zero_hash: u64,
+) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"tls_cipher_diag", current_trace_step());
+    trace_json_i64_field(b"ciphersuite", ciphersuite as i64);
+    trace_json_i64_field(b"cipher_type", cipher_type as i64);
+    trace_json_i64_field(b"cipher_mode", cipher_mode as i64);
+    trace_json_i64_field(b"cipher_operation", cipher_operation as i64);
+    trace_json_u64_field(b"cipher_key_bitlen", cipher_key_bitlen as u64);
+    trace_json_u64_field(b"iv_enc_prefix", iv_enc_prefix);
+    trace_json_u64_field(b"iv_enc_hash", iv_enc_hash);
+    trace_json_u64_field(
+        b"cipher_ctx_enc_aes_zero_hash",
+        cipher_ctx_enc_aes_zero_hash,
+    );
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_tls_record_diag(
+    decrypt_ok: bool,
+    plaintext_hash: u64,
+    plaintext_len: u32,
+    padlen: u32,
+) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"tls_record_diag", current_trace_step());
+    trace_json_bool_field(b"decrypt_ok", decrypt_ok);
+    trace_json_u64_field(b"plaintext_hash", plaintext_hash);
+    trace_json_u64_field(b"plaintext_len", plaintext_len as u64);
+    trace_json_u64_field(b"padlen", padlen as u64);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_tls_cbc_diag(
+    reencrypt_match: bool,
+    plain_hash: u64,
+    expected_cipher_hash: u64,
+    actual_cipher_hash: u64,
+    cipher_len: u32,
+) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"tls_cbc_diag", current_trace_step());
+    trace_json_bool_field(b"reencrypt_match", reencrypt_match);
+    trace_json_u64_field(b"plain_hash", plain_hash);
+    trace_json_u64_field(b"expected_cipher_hash", expected_cipher_hash);
+    trace_json_u64_field(b"actual_cipher_hash", actual_cipher_hash);
+    trace_json_u64_field(b"cipher_len", cipher_len as u64);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_tls_mac_diag(mac_match: bool, expected_mac_hash: u64, actual_mac_hash: u64) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"tls_mac_diag", current_trace_step());
+    trace_json_bool_field(b"mac_match", mac_match);
+    trace_json_u64_field(b"expected_mac_hash", expected_mac_hash);
+    trace_json_u64_field(b"actual_mac_hash", actual_mac_hash);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_model_output_preview(text: &[u8]) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"model_output_preview", current_trace_step());
+    trace_json_string_field(b"text", text);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_model_parse_error(reason: &[u8]) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"model_parse_error", current_trace_step());
+    trace_json_string_field(b"reason", reason);
     uart::write_str("}\n");
 }
 

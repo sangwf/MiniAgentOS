@@ -1,0 +1,48 @@
+{
+  "goal_id": "m5-read-file-and-answer",
+  "goal": "Inspect the workspace and answer which function returns the greeting string.",
+  "input_mode": "text_line",
+  "input_payload": "Which function returns the greeting string? Read the workspace and answer.",
+  "fixture": {
+    "source_asset": "source.md",
+    "workspace_asset": "workspace"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 30,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_completed"
+    ],
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "greeting_text"
+    ],
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "list_workspace"
+      },
+      {
+        "event": "tool_call_requested",
+        "tool": "read_file"
+      }
+    ],
+    "max_tool_calls": 3,
+    "workspace_files_after": {
+      "src/app.py": "def greeting_text():\n    return \"Hello from MiniAgentOS M5\"\n"
+    }
+  }
+}

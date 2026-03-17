@@ -20,6 +20,7 @@ purpose operating system. The harness is a first-class part of the system.
 - `harness/config.example.json`: example config for a real QEMU-backed runtime
 - `harness/config.fixture.json`: config used to validate the harness itself
 - `harness/config.openai.json`: real-model config using `OPENAI_API_KEY` and `gpt-5-mini`
+- `harness/config.runtime-m5.json`: real-runtime M5 config using QEMU, the host M5 bridge, and a live OpenAI path
 - `harness/cases/`: reusable harness cases
 - `harness/fixtures/fake_agent.py`: host-side fixture agent for harness self-test
 - `harness/lib/http_fixtures.py`: source, interpretation, model, and sink HTTP fixtures
@@ -44,6 +45,8 @@ purpose operating system. The harness is a first-class part of the system.
 - `./bin/run-suite --suite m2 --config <config>`: run the M2 suite
 - `./bin/run-suite --suite m3 --config <config>`: run the M3 suite surface
 - `./bin/run-suite --suite m4 --config <config>`: run the initial M4 harness surface
+- `./bin/run-suite --suite m5 --config <config>`: run the M5 fixture suite
+- `./bin/run-suite --suite m5live --config <config>`: run the QEMU-backed live M5 suite
 - `./bin/validate`: run the default M0 case against the fixture agent
 
 ## Harness Rules
@@ -145,8 +148,9 @@ purpose operating system. The harness is a first-class part of the system.
 
 ## M5 Direction
 
-Status: planned only. M5 is defined in docs, but it is not implemented in the
-runtime yet.
+Status: implemented in its first bounded form. The runtime now has a bounded
+workspace/edit/run substrate, an M5 fixture suite, and a QEMU-backed live M5
+suite. Further expansion is still possible, but M5 is no longer planned-only.
 
 - Add a bounded workspace abstraction.
 - Add real file inspection and editing tools.
