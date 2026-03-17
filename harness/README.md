@@ -27,6 +27,18 @@ Each case run produces an output directory with:
 - `report.json`: evaluator report
 - `run.json`: expanded runtime metadata
 
+For M5-style cases, the harness may also preserve:
+
+- `file_reads.json`
+- `file_writes.json`
+- `file_patches.json`
+- `tool_errors.json`
+- `process_runs.json`
+- `process_output/<process_id>.stdout`
+- `process_output/<process_id>.stderr`
+- `workspace_before.json`
+- `workspace_after.json`
+
 For M3-style cases, the primary success path may return directly to UART instead
 of posting to a sink, so the harness now preserves both sink-side and
 terminal-side result artifacts. The harness can also validate compiled intent
@@ -55,6 +67,32 @@ Run the fixture-backed M4 suite with:
 ```sh
 ./bin/run-suite --suite m4 --config harness/config.fixture.json
 ```
+
+## M5 harness surface
+
+The harness now also supports the first bounded coding substrate cases:
+
+- fixture-backed `m5` suite for contract and evaluator validation
+- QEMU-backed `m5live` suite for real-runtime validation
+
+Run the fixture-backed M5 suite with:
+
+```sh
+./bin/run-suite --suite m5 --config harness/config.fixture.json
+```
+
+Run the real-runtime M5 suite with:
+
+```sh
+./bin/run-suite --suite m5live --config harness/config.runtime-m5.json
+```
+
+The real-runtime M5 config uses:
+
+- QEMU guest runtime
+- host M5 bridge
+- Docker-backed bounded Python execution
+- a live OpenAI path
 
 ## Toolchain paths
 

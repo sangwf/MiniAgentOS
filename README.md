@@ -14,7 +14,7 @@ Current implementation status:
 - `M2`: implemented
 - `M3`: implemented
 - `M4`: implemented
-- `M5`: planned only, not implemented yet
+- `M5`: implemented in its first bounded form
 
 Milestone 0 is `Boot to Live Agent`:
 
@@ -97,9 +97,19 @@ Milestone 5 is `Workspace And Execution Substrate`:
 - add observable process output
 - start validating true inspect/edit/run/observe coding loops in the harness
 
-M5 is a roadmap milestone only at the moment. The repository contains the M5
-spec, but the real runtime does not yet expose the M5 workspace or execution
-substrate.
+M5 is no longer roadmap-only. The repository now has both:
+
+- a fixture-backed `m5` suite for harness-first validation
+- a real-runtime `m5live` suite that exercises the bounded coding substrate
+  through QEMU, the host bridge, Docker-backed Python execution, and a live
+  OpenAI path
+
+The first bounded M5 delivery is intentionally narrow:
+
+- workspace access is bounded and policy-controlled
+- execution is Python-first and Docker-backed
+- the agent loop supports real inspect/edit/run/observe flows without becoming
+  an open shell
 
 The formal milestone specs live in:
 
@@ -125,6 +135,8 @@ completion for the real runtime.
 - `docs/schemas/`: task, trace, and intent artifact schema references
 - `harness/`: host-side harness, cases, configs, and fixture services
 - `runtime/`: the real MiniOS runtime being adapted to the M0 harness contract
+- `tools/m5_host_bridge.py`: host-side M5 bridge for workspace and bounded process access
+- `tools/m5_run.py`: one-command manual launcher for the live M5 path
 - `scripts/check.py`: repository validation
 - `bin/check`: lightweight repository checks
 - `bin/qemu-system-aarch64-local`: wrapper around a locally extracted QEMU bottle
@@ -205,6 +217,18 @@ Run the initial M4 harness suite against the fixture agent:
 
 ```sh
 ./bin/run-suite --suite m4 --config harness/config.fixture.json
+```
+
+Run the fixture-backed M5 suite:
+
+```sh
+./bin/run-suite --suite m5 --config harness/config.fixture.json
+```
+
+Run the real-runtime M5 suite:
+
+```sh
+./bin/run-suite --suite m5live --config harness/config.runtime-m5.json
 ```
 
 Run the live OpenAI-backed M4 summarize flow:
@@ -316,6 +340,40 @@ For X/Twitter integration:
 - `search_recent_posts` and `get_user_posts` use `X_BEARER_TOKEN`
 
 The runtime reads those from shell environment variables at build time.
+
+## Manual M5 usage
+
+The shortest supported manual entrypoint for the live bounded coding path is:
+
+```sh
+./tools/m5_run.py
+```
+
+By default it:
+
+- uses the current directory as the bounded workspace
+- loads `OPENAI_API_KEY` from the current shell or an interactive shell
+- starts the host M5 bridge
+- launches the runtime with the known-good live M5 environment for this host
+- cleans up any prior launcher-owned bridge/runtime process groups
+
+On this host, the supported live OpenAI path uses the host SOCKS5 proxy on
+`10808`. `tools/m5_run.py` wires that up for you.
+
+A typical manual M5 task now looks like:
+
+```text
+Goal > Run check.py first. If it fails, fix the minimum code needed in the workspace and run check.py again until it passes.
+```
+
+The bounded M5 tool surface currently includes:
+
+- `list_workspace`
+- `read_file`
+- `write_file`
+- `apply_patch`
+- `run_process`
+- `read_process_output`
 
 ## Harness contract
 
