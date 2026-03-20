@@ -1,0 +1,49 @@
+{
+  "goal_id": "m6live-search-and-answer",
+  "goal": "Validate a real QEMU-backed search -> fetch -> answer loop using Brave-backed search.",
+  "requires_guest_openai": true,
+  "input_mode": "text_line",
+  "input_payload": "Use search_web to research the Brave Search API authentication header, fetch a supporting source before answering, and then tell me exactly which HTTP header Brave Search API uses for authentication.",
+  "fixture": {
+    "source_asset": "source.md",
+    "workspace_asset": "workspace"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 240,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_completed"
+    ],
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "X-Subscription-Token"
+    ],
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "search_web"
+      },
+      {
+        "event": "tool_call_requested",
+        "tool": "fetch_url"
+      }
+    ],
+    "search_results_required": true,
+    "search_count": 1,
+    "fetched_source_count": 1,
+    "max_tool_calls": 6
+  }
+}

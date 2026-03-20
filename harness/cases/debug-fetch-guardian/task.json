@@ -1,0 +1,15 @@
+{
+  "goal_id": "debug-fetch-guardian",
+  "goal": "Reproduce guest-native fetch_url TLS invalid-record failure against a Guardian page.",
+  "requires_guest_openai": true,
+  "input_mode": "text_line",
+  "input_payload": "Summarize https://www.theguardian.com/us-news/2026/mar/16/trump-tariffs-absolute-right-claim-supreme-court-ruling in one sentence.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 180,
+    "result_required": false
+  }
+}

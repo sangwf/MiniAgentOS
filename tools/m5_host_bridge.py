@@ -3,21 +3,37 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
+import re
 import subprocess
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 PROCESS_TIMEOUT_DEFAULT_SEC = 5
 PROCESS_TIMEOUT_MAX_SEC = 30
 PROCESS_OUTPUT_LIMIT_BYTES = 2048
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 OPENAI_RELAY_TIMEOUT_SEC = 60
+BRAVE_WEB_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+BRAVE_SEARCH_TIMEOUT_SEC = 20
+SEARCH_QUERY_LIMIT_BYTES = 512
+SEARCH_TOP_K_DEFAULT = 5
+SEARCH_TOP_K_MAX = 10
+SEARCH_SNIPPET_LIMIT_BYTES = 256
+BRAVE_SEARCH_HTML_URL = "https://search.brave.com/search"
+SEARCH_RESULT_BLOCK_RE = re.compile(
+    r'<div class="snippet[^"]*"[^>]*data-pos="(?P<pos>\d+)"[^>]*data-type="web"[^>]*>.*?'
+    r'<a href="(?P<url>https?://[^"]+)"[^>]*>.*?'
+    r'<div class="title [^"]*"[^>]*title="(?P<title_attr>[^"]*)">(?P<title>.*?)</div></a>.*?'
+    r'<div class="generic-snippet[^"]*"><div class="content[^"]*">(?P<snippet>.*?)</div>',
+    re.S,
+)
 
 
 def upstream_status_from_headers(header_blob: str) -> int:
@@ -117,6 +133,253 @@ def coerce_text(value: str | bytes | None) -> str:
     return value
 
 
+def shell_env_value(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    for shell in ("zsh", "bash"):
+        try:
+            proc = subprocess.run(
+                [shell, "-ic", f'printf %s "${{{name}:-}}"'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout.strip()
+    return ""
+
+
+def host_proxy_args() -> list[str]:
+    if os.environ.get("MINIOS_USE_HOST_SOCKS5_PROXY", "").strip().lower() not in {"1", "true", "yes"}:
+        return []
+    proxy_port = os.environ.get("MINIOS_HOST_SOCKS5_PORT", "10808").strip() or "10808"
+    return ["--socks5-hostname", f"127.0.0.1:{proxy_port}"]
+
+
+def first_non_empty(*values) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def hostname_for_url(raw_url: str) -> str:
+    parsed = urlparse(raw_url)
+    return parsed.hostname or parsed.netloc
+
+
+def parse_locale(locale: str | None) -> tuple[str | None, str | None]:
+    if not locale:
+        return None, None
+    normalized = locale.replace("_", "-").strip()
+    if not normalized:
+        return None, None
+    parts = normalized.split("-", 1)
+    search_lang = parts[0].lower() if parts[0] else None
+    country = parts[1].upper() if len(parts) == 2 and parts[1] else None
+    return search_lang, country
+
+
+def strip_html_markup(raw: str) -> str:
+    without_comments = re.sub(r"<!--.*?-->", " ", raw, flags=re.S)
+    without_tags = re.sub(r"<[^>]+>", " ", without_comments)
+    return " ".join(html.unescape(without_tags).split())
+
+
+def normalize_search_results(
+    raw_results: list[dict],
+    *,
+    top_k: int,
+    domain_allowlist: list[str],
+    domain_denylist: list[str],
+) -> list[dict]:
+    normalized_results: list[dict] = []
+    for raw in raw_results:
+        if len(normalized_results) >= top_k:
+            break
+        url = first_non_empty(str(raw.get("url", "")))
+        if not url:
+            continue
+        meta_url = raw.get("meta_url")
+        domain = ""
+        if isinstance(meta_url, dict):
+            domain = first_non_empty(
+                str(meta_url.get("hostname", "")),
+                str(meta_url.get("netloc", "")),
+            )
+        if not domain:
+            domain = hostname_for_url(url)
+        if domain_allowlist and domain not in domain_allowlist:
+            continue
+        if domain_denylist and domain in domain_denylist:
+            continue
+        snippet = first_non_empty(
+            str(raw.get("description", "")),
+            str((raw.get("extra_snippets") or [""])[0]) if isinstance(raw.get("extra_snippets"), list) else "",
+        )
+        snippet, _ = truncate_utf8(snippet, SEARCH_SNIPPET_LIMIT_BYTES)
+        item = {
+            "id": str(raw.get("id", f"r{len(normalized_results) + 1}")),
+            "title": first_non_empty(str(raw.get("title", "")), url),
+            "url": url,
+            "snippet": snippet,
+            "domain": domain,
+            "rank": len(normalized_results) + 1,
+        }
+        published_at = first_non_empty(
+            str(raw.get("age", "")),
+            str(raw.get("page_age", "")),
+        )
+        if published_at:
+            item["published_at"] = published_at
+        normalized_results.append(item)
+    return normalized_results
+
+
+def brave_search_web(
+    query: str,
+    *,
+    top_k: int = SEARCH_TOP_K_DEFAULT,
+    freshness: str | None = None,
+    domain_allowlist: list[str] | None = None,
+    domain_denylist: list[str] | None = None,
+    locale: str | None = None,
+) -> dict:
+    domain_allowlist = [item.strip() for item in (domain_allowlist or []) if item.strip()]
+    domain_denylist = [item.strip() for item in (domain_denylist or []) if item.strip()]
+    if not query.strip():
+        raise ValueError("query is required")
+    if len(query.encode("utf-8")) > SEARCH_QUERY_LIMIT_BYTES:
+        raise ValueError("query length exceeds policy limit")
+    if top_k < 1 or top_k > SEARCH_TOP_K_MAX:
+        raise ValueError("top_k exceeds policy limit")
+    if len(domain_allowlist) > 10 or len(domain_denylist) > 10:
+        raise ValueError("domain filter exceeds policy limit")
+
+    api_key = shell_env_value("BRAVE_API_KEY")
+    if not api_key:
+        raise RuntimeError("BRAVE_API_KEY is not set for the host bridge")
+
+    search_lang, country = parse_locale(locale)
+    api_command = [
+        "curl",
+        "-sS",
+        "--compressed",
+        "--max-time",
+        str(BRAVE_SEARCH_TIMEOUT_SEC),
+        *host_proxy_args(),
+        "--get",
+        BRAVE_WEB_SEARCH_URL,
+        "-H",
+        "Accept: application/json",
+        "-H",
+        "Accept-Encoding: gzip",
+        "-H",
+        f"X-Subscription-Token: {api_key}",
+        "--data-urlencode",
+        f"q={query}",
+        "--data-urlencode",
+        f"count={top_k}",
+    ]
+    if freshness:
+        api_command.extend(["--data-urlencode", f"freshness={freshness}"])
+    if search_lang:
+        api_command.extend(["--data-urlencode", f"search_lang={search_lang}"])
+    if country:
+        api_command.extend(["--data-urlencode", f"country={country}"])
+    completed = subprocess.run(
+        api_command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=BRAVE_SEARCH_TIMEOUT_SEC + 5,
+        check=False,
+    )
+    if completed.returncode == 0:
+        try:
+            body = json.loads(completed.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"invalid Brave search response: {exc}") from exc
+
+        raw_web = body.get("web")
+        raw_results = raw_web.get("results", []) if isinstance(raw_web, dict) else []
+        normalized_results = normalize_search_results(
+            raw_results if isinstance(raw_results, list) else [],
+            top_k=top_k,
+            domain_allowlist=domain_allowlist,
+            domain_denylist=domain_denylist,
+        )
+        query_meta = body.get("query")
+        more_results_available = False
+        if isinstance(query_meta, dict):
+            more_results_available = bool(query_meta.get("more_results_available", False))
+        return {
+            "ok": True,
+            "query": query,
+            "results": normalized_results,
+            "truncated": more_results_available or len(normalized_results) < len(raw_results),
+            "provider": "brave",
+        }
+
+    fallback_detail = completed.stderr.strip() or "curl Brave search failed"
+    html_command = [
+        "curl",
+        "-sS",
+        "--compressed",
+        "--max-time",
+        str(BRAVE_SEARCH_TIMEOUT_SEC),
+        *host_proxy_args(),
+        f"{BRAVE_SEARCH_HTML_URL}?q={quote_plus(query)}&source=web",
+    ]
+    html_completed = subprocess.run(
+        html_command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=BRAVE_SEARCH_TIMEOUT_SEC + 5,
+        check=False,
+    )
+    if html_completed.returncode != 0:
+        detail = html_completed.stderr.strip() or fallback_detail
+        raise RuntimeError(detail)
+    html_body = html_completed.stdout or ""
+    normalized_results: list[dict] = []
+    for match in SEARCH_RESULT_BLOCK_RE.finditer(html_body):
+        if len(normalized_results) >= top_k:
+            break
+        url = html.unescape(match.group("url"))
+        domain = hostname_for_url(url)
+        if domain_allowlist and domain not in domain_allowlist:
+            continue
+        if domain_denylist and domain in domain_denylist:
+            continue
+        title = strip_html_markup(match.group("title_attr") or match.group("title"))
+        snippet = strip_html_markup(match.group("snippet"))
+        snippet, _ = truncate_utf8(snippet, SEARCH_SNIPPET_LIMIT_BYTES)
+        normalized_results.append(
+            {
+                "id": f"r{len(normalized_results) + 1}",
+                "title": title or url,
+                "url": url,
+                "snippet": snippet,
+                "domain": domain,
+                "rank": len(normalized_results) + 1,
+            }
+        )
+    return {
+        "ok": True,
+        "query": query,
+        "results": normalized_results,
+        "truncated": len(normalized_results) >= top_k,
+        "provider": "brave_html_fallback",
+        "fallback_reason": fallback_detail,
+    }
+
+
 class ArtifactRecorder:
     def __init__(self, output_dir: Path | None) -> None:
         self.output_dir = output_dir.resolve() if output_dir is not None else None
@@ -127,6 +390,7 @@ class ArtifactRecorder:
         self.tool_errors: list[dict] = []
         self.process_runs: list[dict] = []
         self.process_outputs: dict[str, dict] = {}
+        self.searches: list[dict] = []
 
     def _write_json(self, name: str, payload) -> None:
         if self.output_dir is None:
@@ -145,6 +409,7 @@ class ArtifactRecorder:
         self._write_json("file_patches.json", self.file_patches)
         self._write_json("tool_errors.json", self.tool_errors)
         self._write_json("process_runs.json", self.process_runs)
+        self._write_json("search_results.json", {"searches": self.searches})
         process_output_dir = self.output_dir / "process_output"
         process_output_dir.mkdir(exist_ok=True)
         for process_id, payload in self.process_outputs.items():
@@ -199,6 +464,13 @@ class ArtifactRecorder:
                     "stdout": stdout,
                     "stderr": stderr,
                 }
+            self._flush_locked()
+
+    def record_search(self, record: dict) -> None:
+        with self._lock:
+            entry = {"turn_index": 0, "tool_call_index": len(self.searches)}
+            entry.update(record)
+            self.searches.append(entry)
             self._flush_locked()
 
 
@@ -551,8 +823,38 @@ class M5BridgeHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "workspace_root": str(self.workspace_root),
                         "python_image": self.process_store.python_image,
+                        "brave_search_configured": bool(shell_env_value("BRAVE_API_KEY")),
                     },
                 )
+                return
+            if parsed.path == "/search/web":
+                query_text = query.get("query", [""])[0]
+                top_k = int(query.get("top_k", [str(SEARCH_TOP_K_DEFAULT)])[0])
+                freshness = query.get("freshness", [""])[0] or None
+                locale = query.get("locale", [""])[0] or None
+                domain_allowlist = query.get("domain_allow", [])
+                domain_denylist = query.get("domain_deny", [])
+                payload = brave_search_web(
+                    query_text,
+                    top_k=top_k,
+                    freshness=freshness,
+                    domain_allowlist=domain_allowlist,
+                    domain_denylist=domain_denylist,
+                    locale=locale,
+                )
+                if self.artifacts is not None:
+                    self.artifacts.record_search(
+                        {
+                            "query": query_text,
+                            "top_k": top_k,
+                            "freshness": freshness,
+                            "locale": locale,
+                            "results": payload.get("results", []),
+                            "truncated": bool(payload.get("truncated", False)),
+                            "provider": payload.get("provider", "brave"),
+                        }
+                    )
+                self._write_json(HTTPStatus.OK, payload)
                 return
             if parsed.path == "/workspace/list":
                 raw_path = query.get("path", [""])[0]
@@ -594,10 +896,19 @@ class M5BridgeHandler(BaseHTTPRequestHandler):
                 {"ok": False, "error": {"code": "missing_process", "message": "process run was not found"}},
             )
         except ValueError as exc:
-            self._record_error("invalid_path", str(exc), route=parsed.path)
+            code = "invalid_path" if str(exc) == "invalid workspace path" else "invalid_request"
+            self._record_error(code, str(exc), route=parsed.path)
             self._write_json(
                 HTTPStatus.BAD_REQUEST,
-                {"ok": False, "error": {"code": "invalid_path", "message": str(exc)}},
+                {"ok": False, "error": {"code": code, "message": str(exc)}},
+            )
+        except RuntimeError as exc:
+            code = "backend_unavailable" if "BRAVE_API_KEY" in str(exc) else "relay_failed"
+            status = HTTPStatus.SERVICE_UNAVAILABLE if code == "backend_unavailable" else HTTPStatus.BAD_GATEWAY
+            self._record_error(code, str(exc), route=parsed.path)
+            self._write_json(
+                status,
+                {"ok": False, "error": {"code": code, "message": str(exc)}},
             )
 
     def do_POST(self) -> None:
@@ -706,7 +1017,7 @@ class M5BridgeHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="MiniAgentOS M5 host bridge")
+    parser = argparse.ArgumentParser(description="MiniAgentOS M5/M6 host bridge")
     parser.add_argument("--workspace", required=True, help="Workspace root exposed to the guest")
     parser.add_argument("--bind", default="0.0.0.0", help="Bind address")
     parser.add_argument("--port", type=int, default=8090, help="Bind port")
@@ -731,7 +1042,10 @@ def main() -> int:
         },
     )
     server = ThreadingHTTPServer((args.bind, args.port), handler)
-    print(f"MiniAgentOS M5 bridge listening on http://{args.bind}:{args.port} workspace={workspace_root}", flush=True)
+    print(
+        f"MiniAgentOS M5/M6 bridge listening on http://{args.bind}:{args.port} workspace={workspace_root}",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

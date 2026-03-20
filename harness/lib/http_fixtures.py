@@ -78,13 +78,23 @@ def start_result_sink(bind_host: str, port: int, path: str):
     return managed, state, f"http://{bind_host}:{server.server_port}{path}"
 
 
-def start_source_fixture(bind_host: str, port: int, path: str, content: str):
-    payload = content.encode("utf-8")
+def start_source_fixture(
+    bind_host: str,
+    port: int,
+    path: str,
+    content: str,
+    pages: dict[str, str] | None = None,
+):
+    pages = pages or {}
+    payloads = {path: content.encode("utf-8")}
+    for extra_path, extra_content in pages.items():
+        payloads[str(extra_path)] = str(extra_content).encode("utf-8")
     state = CapturedRequestState()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path != path:
+            payload = payloads.get(self.path)
+            if payload is None:
                 self.send_response(404)
                 self.end_headers()
                 return
@@ -435,7 +445,7 @@ def start_model_gateway(
     ok_path: str,
     error_path: str,
     backend: str = "mock",
-    model: str = "gpt-5-mini",
+    model: str = "gpt-5.4-mini",
     api_key_env: str = "OPENAI_API_KEY",
 ):
     state = CapturedRequestState()
@@ -520,7 +530,7 @@ def start_interpretation_gateway(
     ok_path: str,
     error_path: str,
     backend: str = "mock",
-    model: str = "gpt-5-mini",
+    model: str = "gpt-5.4-mini",
     api_key_env: str = "OPENAI_API_KEY",
 ):
     state = CapturedRequestState()
@@ -594,7 +604,7 @@ def start_translation_gateway(
     ok_path: str,
     error_path: str,
     backend: str = "mock",
-    model: str = "gpt-5-mini",
+    model: str = "gpt-5.4-mini",
     api_key_env: str = "OPENAI_API_KEY",
 ):
     return start_interpretation_gateway(

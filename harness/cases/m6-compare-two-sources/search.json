@@ -1,0 +1,22 @@
+{
+  "queries": {
+    "scheduler tradeoffs": [
+      {
+        "id": "r1",
+        "title": "Tokio notes",
+        "source_path": "/m6/compare-a",
+        "snippet": "One note mentions tail latency.",
+        "domain": "fixture.local",
+        "rank": 1
+      },
+      {
+        "id": "r2",
+        "title": "Monoio notes",
+        "source_path": "/m6/compare-b",
+        "snippet": "Another note mentions throughput.",
+        "domain": "fixture.local",
+        "rank": 2
+      }
+    ]
+  }
+}

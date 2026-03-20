@@ -1,0 +1,54 @@
+{
+  "goal_id": "m6-snippet-is-not-evidence",
+  "goal": "Ensure fetched evidence is used instead of relying on snippets alone.",
+  "input_mode": "text_line",
+  "input_payload": "Search the web for score article and tell me whether the score is 91 or 94.",
+  "fixture": {
+    "source_asset": "source.md",
+    "source_pages_asset": "pages.json",
+    "search_asset": "search.json"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 30,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_completed"
+    ],
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "94"
+    ],
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "search_web"
+      },
+      {
+        "event": "tool_call_requested",
+        "tool": "fetch_url"
+      }
+    ],
+    "max_tool_calls": 2,
+    "search_results_required": true,
+    "search_count": 1,
+    "fetched_source_count": 1,
+    "source_memory_required": true,
+    "source_memory_count": 1,
+    "request_counts": {
+      "source_requests": 1
+    }
+  }
+}

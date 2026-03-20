@@ -15,6 +15,9 @@ pub(crate) use skill::handle_agent_fetch_done;
 pub(crate) use task::handle_agent_task_line;
 pub(super) use model::extract_openai_output_text;
 
+static mut MODEL_TRACE_NEXT_INTERACTION_ID: u32 = 0;
+static mut MODEL_TRACE_CURRENT_INTERACTION_ID: u32 = 0;
+
 fn current_trace_step() -> u8 {
     unsafe {
         if AGENT_MODE == AGENT_MODE_M4 {
@@ -144,6 +147,21 @@ fn trace_json_bool_field(name: &[u8], value: bool) {
     } else {
         uart::write_str("false");
     }
+}
+
+fn trace_next_model_interaction_id() -> u32 {
+    unsafe {
+        MODEL_TRACE_NEXT_INTERACTION_ID = MODEL_TRACE_NEXT_INTERACTION_ID.wrapping_add(1);
+        if MODEL_TRACE_NEXT_INTERACTION_ID == 0 {
+            MODEL_TRACE_NEXT_INTERACTION_ID = 1;
+        }
+        MODEL_TRACE_CURRENT_INTERACTION_ID = MODEL_TRACE_NEXT_INTERACTION_ID;
+        MODEL_TRACE_CURRENT_INTERACTION_ID
+    }
+}
+
+fn trace_current_model_interaction_id() -> u32 {
+    unsafe { MODEL_TRACE_CURRENT_INTERACTION_ID }
 }
 
 fn trace_skill_called(skill: &[u8], step: u8) {
@@ -471,6 +489,52 @@ pub(crate) fn trace_model_output_preview(text: &[u8]) {
         return;
     }
     trace_begin(b"model_output_preview", current_trace_step());
+    trace_json_string_field(b"text", text);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_model_request_snapshot(
+    phase: &[u8],
+    model: &[u8],
+    instructions: &[u8],
+    input: &[u8],
+    reasoning_effort: &[u8],
+    max_output_tokens: u64,
+) {
+    if !trace_output_enabled() {
+        return;
+    }
+    let interaction_id = trace_next_model_interaction_id();
+    trace_begin(b"model_request_snapshot", current_trace_step());
+    trace_json_u64_field(b"interaction_id", interaction_id as u64);
+    trace_json_string_field(b"phase", phase);
+    trace_json_string_field(b"model", model);
+    trace_json_string_field(b"instructions", instructions);
+    trace_json_string_field(b"input", input);
+    trace_json_string_field(b"reasoning_effort", reasoning_effort);
+    trace_json_u64_field(b"max_output_tokens", max_output_tokens);
+    uart::write_str("}\n");
+}
+
+pub(crate) fn trace_model_response_snapshot(
+    phase: &[u8],
+    http_status: u16,
+    body_truncated: bool,
+    parsed_output: bool,
+    text: &[u8],
+) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"model_response_snapshot", current_trace_step());
+    trace_json_u64_field(
+        b"interaction_id",
+        trace_current_model_interaction_id() as u64,
+    );
+    trace_json_string_field(b"phase", phase);
+    trace_json_u64_field(b"http_status", http_status as u64);
+    trace_json_bool_field(b"body_truncated", body_truncated);
+    trace_json_bool_field(b"parsed_output", parsed_output);
     trace_json_string_field(b"text", text);
     uart::write_str("}\n");
 }

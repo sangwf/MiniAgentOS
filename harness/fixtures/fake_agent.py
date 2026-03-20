@@ -17,12 +17,20 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from harness.lib.m5_substrate import M5Substrate
+from harness.lib.m6_substrate import M6Substrate
 
 
 WORKSPACE_ROOT = Path(os.environ["HARNESS_WORKSPACE_ROOT"]).resolve() if os.environ.get("HARNESS_WORKSPACE_ROOT") else None
 OUTPUT_DIR = Path(os.environ["HARNESS_OUTPUT_DIR"]).resolve() if os.environ.get("HARNESS_OUTPUT_DIR") else None
 DOCKER_IMAGE = os.environ.get("HARNESS_DOCKER_IMAGE", "python:3.12-slim")
+SEARCH_FIXTURE_PATH = (
+    Path(os.environ["HARNESS_SEARCH_FIXTURE_PATH"]).resolve()
+    if os.environ.get("HARNESS_SEARCH_FIXTURE_PATH")
+    else None
+)
+SOURCE_BASE_URL = os.environ.get("HARNESS_SOURCE_BASE_URL")
 M5 = M5Substrate(WORKSPACE_ROOT, OUTPUT_DIR, DOCKER_IMAGE)
+M6 = M6Substrate(SEARCH_FIXTURE_PATH, SOURCE_BASE_URL, OUTPUT_DIR)
 
 
 def emit(event, **extra):
@@ -191,6 +199,185 @@ def _find_function_name(content: str) -> str | None:
     return None
 
 
+def _extract_search_query(text: str) -> str | None:
+    patterns = [
+        r"search the web for (?P<query>.+?)(?: and |\.|$)",
+        r"search for (?P<query>.+?)(?: and |\.|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if not match:
+            continue
+        query = match.group("query").strip()
+        if query:
+            return query
+    return None
+
+
+def _extract_labeled_value(content: str, label: str) -> str | None:
+    prefix = label.lower() + ":"
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith(prefix):
+            return stripped.split(":", 1)[1].strip()
+    return None
+
+
+def _fetch_result_and_record(result: dict, turn_index: int, tool_index: int) -> str:
+    content = fetch_text(result["url"])
+    M6.record_fetch(
+        url=result["url"],
+        content=content,
+        turn_index=turn_index,
+        tool_call_index=tool_index,
+        search_result_id=result.get("id"),
+    )
+    return content
+
+
+def _answer_from_content(content: str) -> str:
+    for label in ("Answer", "Provider", "Score", "Summary"):
+        value = _extract_labeled_value(content, label)
+        if value:
+            return value
+    summary = summarize_text(content, 2)
+    return summary or "I read the selected source but could not extract a concise answer."
+
+
+def _comparison_line(contents: list[tuple[str, str]]) -> str:
+    lines = []
+    for title, content in contents:
+        value = _extract_labeled_value(content, "Position") or _extract_labeled_value(
+            content, "Summary"
+        ) or summarize_text(content, 1)
+        lines.append(f"{title}: {value}")
+    return "; ".join(lines)
+
+
+def _performance_line(records: list[dict]) -> str:
+    used_ids = []
+    claims = []
+    for item in records:
+        value = _extract_labeled_value(item["content"], "Performance")
+        if not value:
+            continue
+        claims.append(value)
+        used_ids.append(item["id"])
+    if used_ids:
+        M6.mark_used(used_ids, records[0]["turn_index"])
+    if claims:
+        return "; ".join(claims)
+    return "No explicit performance claims were recorded in the known sources."
+
+
+def _handle_m6_turn(prompt: str, text: str, session_state: dict, turn_index: int) -> str | None:
+    if not M6.available():
+        return None
+
+    lowered = text.lower().strip()
+    tool_index = 0
+    search_query = _extract_search_query(text)
+
+    if search_query:
+        emit("model_turn_completed", stop_reason="tool_call")
+        search_result = M6.search_web(
+            search_query,
+            turn_index=turn_index,
+            tool_call_index=tool_index,
+        )
+        tool_call(
+            "search_web",
+            {
+                "query": search_query,
+                "top_k": 5,
+                "freshness": None,
+                "domain_allowlist": [],
+                "domain_denylist": [],
+                "locale": None,
+            },
+            search_result,
+            status="ok" if search_result.get("ok") else "denied",
+        )
+        tool_index += 1
+        if not search_result.get("ok"):
+            emit("assistant_response_rendered")
+            emit("loop_stopped", stop_reason="policy_denied")
+            print_reason(prompt, search_result["error"]["message"])
+            return "policy_denied"
+
+        results = search_result.get("results", [])
+        session_state["m6_results"] = results
+        session_state.setdefault("m6_fetched", {})
+        if not results:
+            emit("assistant_response_rendered")
+            emit("loop_stopped", stop_reason="final_response")
+            print_summary(prompt, ["- I could not find enough evidence from search results."])
+            return "ok"
+
+        if "compare" in lowered:
+            fetched = []
+            for result in results[:2]:
+                content = _fetch_result_and_record(result, turn_index, tool_index)
+                tool_call("fetch_url", {"url": result["url"]}, {"ok": True})
+                tool_index += 1
+                session_state["m6_fetched"][result["id"]] = {
+                    "id": result["id"],
+                    "url": result["url"],
+                    "title": result["title"],
+                    "content": content,
+                    "turn_index": turn_index,
+                }
+                fetched.append((result["title"], content))
+            emit("assistant_response_rendered")
+            emit("loop_stopped", stop_reason="final_response")
+            print_summary(prompt, [f"- Comparison: {_comparison_line(fetched)}"])
+            return "ok"
+
+        first = results[0]
+        content = _fetch_result_and_record(first, turn_index, tool_index)
+        tool_call("fetch_url", {"url": first["url"]}, {"ok": True})
+        tool_index += 1
+        session_state["m6_fetched"][first["id"]] = {
+            "id": first["id"],
+            "url": first["url"],
+            "title": first["title"],
+            "content": content,
+            "turn_index": turn_index,
+        }
+        if "prove" in lowered or "confirm" in lowered:
+            evidence = _extract_labeled_value(content, "Evidence")
+            verdict = _extract_labeled_value(content, "Verdict")
+            if verdict == "insufficient" or not evidence:
+                emit("assistant_response_rendered")
+                emit("loop_stopped", stop_reason="final_response")
+                print_summary(prompt, ["- I cannot confirm that claim from the fetched evidence."])
+                return "ok"
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {_answer_from_content(content)}"])
+        return "ok"
+
+    fetched_values = list(session_state.get("m6_fetched", {}).values())
+    if fetched_values and "performance" in lowered:
+        emit("model_turn_completed", stop_reason="final_response")
+        line = _performance_line(
+            [
+                {
+                    "id": item["id"],
+                    "content": item["content"],
+                    "turn_index": turn_index,
+                }
+                for item in fetched_values
+            ]
+        )
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {line}"])
+        return "ok"
+
+    return None
+
+
 def _handle_m5_turn(prompt: str, text: str) -> str | None:
     if not M5.available():
         return None
@@ -311,11 +498,19 @@ def _handle_m5_turn(prompt: str, text: str) -> str | None:
     return None
 
 
-def handle_text_turn(prompt: str, text: str, session_state: dict):
+def handle_text_turn(prompt: str, text: str, session_state: dict, turn_index: int):
     lowered = text.lower().strip()
 
     emit("user_turn_received")
     emit("model_turn_started")
+
+    m6_status = _handle_m6_turn(prompt, text, session_state, turn_index)
+    if m6_status == "ok":
+        emit("goal_completed", status="ok")
+        return
+    if m6_status == "policy_denied":
+        emit("goal_refused", status="refused")
+        return
 
     m5_status = _handle_m5_turn(prompt, text)
     if m5_status == "ok":
@@ -477,6 +672,7 @@ def main():
     print_prompt(args.prompt)
 
     session_state: dict[str, object] = {}
+    turn_index = 0
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -521,7 +717,8 @@ def main():
             print_prompt(args.prompt)
             continue
 
-        handle_text_turn(args.prompt, command, session_state)
+        handle_text_turn(args.prompt, command, session_state, turn_index)
+        turn_index += 1
 
 
 if __name__ == "__main__":

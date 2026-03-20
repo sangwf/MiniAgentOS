@@ -1,0 +1,14 @@
+{
+  "queries": {
+    "benchmark rumor": [
+      {
+        "id": "r1",
+        "title": "Benchmark rumor note",
+        "source_path": "/m6/rumor",
+        "snippet": "Early reports mention some measurements.",
+        "domain": "fixture.local",
+        "rank": 1
+      }
+    ]
+  }
+}

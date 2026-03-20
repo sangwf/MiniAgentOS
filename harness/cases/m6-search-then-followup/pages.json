@@ -1,0 +1,3 @@
+{
+  "/m6/performance": "# M6 Performance Update\nSummary: M6 added a bounded search tool.\nPerformance: The fixture path stays deterministic and the live path uses Brave Search.\n"
+}

@@ -1,0 +1,14 @@
+{
+  "queries": {
+    "score article": [
+      {
+        "id": "r1",
+        "title": "Score article",
+        "source_path": "/m6/score",
+        "snippet": "The snippet makes it look like the score might be 91.",
+        "domain": "fixture.local",
+        "rank": 1
+      }
+    ]
+  }
+}

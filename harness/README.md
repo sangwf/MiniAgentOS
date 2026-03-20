@@ -19,6 +19,7 @@ Each case run produces an output directory with:
 - `uart.raw.log`: raw UART byte stream
 - `uart.log`: UTF-8 decoded UART output
 - `trace.jsonl`: parsed trace events
+- `llm_api_log.jsonl`: extracted LLM request/response snapshots, when emitted by the runtime
 - `result.json`: sink payload, if any
 - `terminal_result.json`: extracted terminal-facing result, if any
 - `intent_ir.json`: extracted compiled intent, if the runtime emitted it
@@ -38,6 +39,12 @@ For M5-style cases, the harness may also preserve:
 - `process_output/<process_id>.stderr`
 - `workspace_before.json`
 - `workspace_after.json`
+
+For M6-style cases, the harness may also preserve:
+
+- `search_results.json`
+- `fetched_sources.json`
+- `source_memory.json`
 
 For M3-style cases, the primary success path may return directly to UART instead
 of posting to a sink, so the harness now preserves both sink-side and
@@ -93,6 +100,33 @@ The real-runtime M5 config uses:
 - host M5 bridge
 - Docker-backed bounded Python execution
 - a live OpenAI path
+
+## M6 harness surface
+
+The harness now also supports the first bounded research cases:
+
+- fixture-backed `m6` suite for deterministic search/fetch/follow-up validation
+- live `m6live` suite for a first QEMU-backed `search_web -> fetch_url -> final`
+  research loop
+
+Run the fixture-backed M6 suite with:
+
+```sh
+./bin/run-suite --suite m6 --config harness/config.fixture.json
+```
+
+Run the first live M6 suite with:
+
+```sh
+./bin/run-suite --suite m6live --config harness/config.runtime-m6.json
+```
+
+The first M6 slices validate:
+
+- `search_web`
+- separation of search snippets from fetched evidence
+- bounded follow-up reuse via source memory
+- a real-runtime Brave-backed search -> fetch -> answer path
 
 ## Toolchain paths
 

@@ -23,6 +23,7 @@ from harness.lib.http_fixtures import (
     start_source_fixture,
     start_x_fixture,
 )
+from harness.lib.llm_log import extract_llm_api_log, write_llm_api_log_jsonl
 from harness.lib.protocol import (
     TRACE_PREFIX,
     build_input_line,
@@ -273,6 +274,53 @@ def _extract_tool_calls(trace_events: list[dict]) -> list[dict]:
     return extracted
 
 
+def _synthesize_fetched_sources(session_transcript: list[dict], search_results) -> dict | None:
+    url_to_result_id: dict[str, str] = {}
+    if isinstance(search_results, dict):
+        for search in search_results.get("searches", []):
+            if not isinstance(search, dict):
+                continue
+            for result in search.get("results", []):
+                if not isinstance(result, dict):
+                    continue
+                url = str(result.get("url", "")).strip()
+                result_id = str(result.get("id", "")).strip()
+                if url and result_id and url not in url_to_result_id:
+                    url_to_result_id[url] = result_id
+    synthesized: list[dict] = []
+    for turn in session_transcript:
+        turn_index = int(turn.get("turn", 0))
+        tool_calls = turn.get("tool_calls", [])
+        if not isinstance(tool_calls, list):
+            continue
+        for tool_call_index, tool_call in enumerate(tool_calls):
+            if not isinstance(tool_call, dict):
+                continue
+            if tool_call.get("event") != "tool_call_requested":
+                continue
+            if tool_call.get("tool") != "fetch_url":
+                continue
+            arguments = tool_call.get("arguments", {})
+            if not isinstance(arguments, dict):
+                continue
+            url = str(arguments.get("url", "")).strip()
+            if not url:
+                continue
+            synthesized.append(
+                {
+                    "turn_index": turn_index,
+                    "tool_call_index": tool_call_index,
+                    "search_result_id": url_to_result_id.get(url),
+                    "url": url,
+                    "status_code": None,
+                    "content_type": None,
+                    "content_preview": "",
+                    "truncated": True,
+                }
+            )
+    return {"sources": synthesized} if synthesized else None
+
+
 def _detect_guest_exception(uart_text: str) -> str | None:
     normalized_text = uart_text.replace("\r\n", "\n").replace("\r", "\n")
     match = re.search(r"(?:^|\n)(exception vector: .+)", normalized_text)
@@ -303,6 +351,21 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         raise ValueError("case is missing fixture.source_asset")
     source_path = case_dir / source_asset
     source_content = source_path.read_text(encoding="utf-8")
+    source_pages = None
+    source_pages_asset = case_data.get("fixture", {}).get("source_pages_asset")
+    if source_pages_asset:
+        source_pages_path = case_dir / source_pages_asset
+        source_pages = _load_json(source_pages_path)
+        if not isinstance(source_pages, dict):
+            raise ValueError("case fixture.source_pages_asset must be a JSON object")
+        source_pages = {str(key): str(value) for key, value in source_pages.items()}
+
+    search_fixture_path = None
+    search_asset = case_data.get("fixture", {}).get("search_asset")
+    if search_asset:
+        search_fixture_path = (case_dir / search_asset).resolve()
+        if not search_fixture_path.exists():
+            raise ValueError("case fixture.search_asset was not found")
 
     workspace_root = None
     workspace_before = None
@@ -331,6 +394,7 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         int(source_cfg.get("port", 0)),
         source_cfg["path"],
         source_content,
+        pages=source_pages,
     )
 
     x_server = None
@@ -363,7 +427,7 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
             model_cfg["path"],
             model_cfg.get("error_path", model_cfg["path"] + "-error"),
             backend=model_cfg.get("backend", "mock"),
-            model=model_cfg.get("model", "gpt-5-mini"),
+            model=model_cfg.get("model", "gpt-5.4-mini"),
             api_key_env=model_cfg.get("api_key_env", "OPENAI_API_KEY"),
         )
         model_agent_url = "http://{host}:{port}{path}".format(
@@ -391,7 +455,7 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
             interpretation_cfg["path"],
             interpretation_cfg.get("error_path", interpretation_cfg["path"] + "-error"),
             backend=interpretation_cfg.get("backend", "mock"),
-            model=interpretation_cfg.get("model", "gpt-5-mini"),
+            model=interpretation_cfg.get("model", "gpt-5.4-mini"),
             api_key_env=interpretation_cfg.get("api_key_env", "OPENAI_API_KEY"),
         )
         interpretation_agent_url = "http://{host}:{port}{path}".format(
@@ -412,6 +476,11 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         bridge_bind_host = str(bridge_cfg.get("bind_host", "127.0.0.1"))
         bridge_port = int(bridge_cfg.get("port", 8090))
         bridge_launch_env = _launch_env(config_data)
+        host_search_env = str(config_data.get("host_search_key_env", "")).strip()
+        if host_search_env:
+            host_search_value = _shell_env_value(host_search_env)
+            if host_search_value:
+                bridge_launch_env[host_search_env] = host_search_value
         bridge_log = open(output_dir / "m5_bridge.log", "wb")
         bridge_command = [
             bridge_launch_env.get("PYTHON", "python3"),
@@ -447,6 +516,10 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         host=source_cfg["agent_host"],
         port=source_server.server.server_port,
         path=source_cfg["path"],
+    )
+    source_base_url = "http://{host}:{port}".format(
+        host=source_cfg["agent_host"],
+        port=source_server.server.server_port,
     )
 
     replacements = {
@@ -488,6 +561,7 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         "case": str(case_path.relative_to(root)),
         "config": str(config_path.relative_to(root)),
         "source_url": source_agent_url,
+        "source_base_url": source_base_url,
         "result_sink_url": sink_agent_url,
         "model_url": model_agent_url,
         "model_error_url": model_error_agent_url,
@@ -502,7 +576,11 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         "path_prefixes": config_data.get("path_prefixes", []),
         "input_lines": input_lines,
         "workspace_root": str(workspace_root) if workspace_root else None,
+        "search_fixture_path": str(search_fixture_path) if search_fixture_path else None,
     }
+    host_search_env = str(config_data.get("host_search_key_env", "")).strip()
+    if host_search_env:
+        run_metadata["host_search_secret_env"] = host_search_env
     pre_input_lines: list[str] = []
     pre_input_lines.append("status plain")
     if case_data.get("expect", {}).get("required_trace_events"):
@@ -523,10 +601,13 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
     launch_env = _launch_env(config_data)
     for key, value in replacements.items():
         launch_env[f"HARNESS_{key}"] = value
+    launch_env["HARNESS_SOURCE_BASE_URL"] = source_base_url
     launch_env["HARNESS_OUTPUT_DIR"] = str(output_dir)
     launch_env["HARNESS_DOCKER_IMAGE"] = config_data.get("docker_image", "python:3.12-slim")
     if workspace_root is not None:
         launch_env["HARNESS_WORKSPACE_ROOT"] = str(workspace_root)
+    if search_fixture_path is not None:
+        launch_env["HARNESS_SEARCH_FIXTURE_PATH"] = str(search_fixture_path)
     proc = subprocess.Popen(
         command,
         cwd=workdir,
@@ -824,6 +905,9 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         "".join(line + "\n" for line in trace_lines),
         encoding="utf-8",
     )
+    llm_api_log = extract_llm_api_log(trace_events)
+    if llm_api_log:
+        write_llm_api_log_jsonl(output_dir / "llm_api_log.jsonl", llm_api_log)
 
     result_payload = None
     if sink_state.requests:
@@ -862,6 +946,22 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
     tool_errors_path = output_dir / "tool_errors.json"
     if tool_errors_path.exists():
         tool_errors = _load_json(tool_errors_path)
+    search_results = None
+    search_results_path = output_dir / "search_results.json"
+    if search_results_path.exists():
+        search_results = _load_json(search_results_path)
+    fetched_sources = None
+    fetched_sources_path = output_dir / "fetched_sources.json"
+    if fetched_sources_path.exists():
+        fetched_sources = _load_json(fetched_sources_path)
+    elif session_transcript:
+        fetched_sources = _synthesize_fetched_sources(session_transcript, search_results)
+        if fetched_sources is not None:
+            _write_json(fetched_sources_path, fetched_sources)
+    source_memory = None
+    source_memory_path = output_dir / "source_memory.json"
+    if source_memory_path.exists():
+        source_memory = _load_json(source_memory_path)
 
     observations = {
         "sink_requests": len(sink_state.requests),
@@ -897,6 +997,9 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         workspace_after=workspace_after,
         process_runs=process_runs,
         tool_errors=tool_errors,
+        search_results=search_results,
+        fetched_sources=fetched_sources,
+        source_memory=source_memory,
     )
     _write_json(output_dir / "report.json", report)
     return 0 if report["pass"] else 1

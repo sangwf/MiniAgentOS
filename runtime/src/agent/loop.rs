@@ -211,6 +211,7 @@ fn is_supported_m4_tool_name(tool: &[u8], tool_len: usize) -> bool {
     starts_with(tool, tool_len, b"fetch_url")
         || starts_with(tool, tool_len, b"post_url")
         || starts_with(tool, tool_len, b"post_tweet")
+        || starts_with(tool, tool_len, b"search_web")
         || starts_with(tool, tool_len, b"search_recent_posts")
         || starts_with(tool, tool_len, b"get_user_posts")
         || starts_with(tool, tool_len, b"read_session_state")
@@ -290,6 +291,10 @@ fn m4_use_host_openai_bridge() -> bool {
     HOST_OPENAI_BRIDGE_ENABLED || unsafe { M4_USE_HOST_OPENAI_BRIDGE }
 }
 
+fn m4_bridge_tool_prefers_host_openai(tool: &[u8]) -> bool {
+    !starts_with(tool, tool.len(), b"search_web")
+}
+
 fn m4_prepare_openai_attempt(message: &[u8]) {
     let retry_backoff = unsafe {
         if M4_MODEL_RETRIES == 0 {
@@ -339,6 +344,18 @@ fn m4_mark_retryable_openai_failure() {
     }
     m4_schedule_user_turn_failure_cooldown();
     crate::tls::hard_reset();
+}
+
+fn m4_retry_model_parse_error(phase: &'static [u8]) -> bool {
+    if unsafe { M4_MODEL_RETRIES } >= M4_OPENAI_MAX_RETRIES {
+        return false;
+    }
+    unsafe {
+        M4_MODEL_RETRIES = M4_MODEL_RETRIES.wrapping_add(1);
+    }
+    trace_retry_scheduled(unsafe { M4_LOOP_STEP }, phase, unsafe { M4_MODEL_RETRIES });
+    human_status(b"retrying...");
+    start_m4_model_turn()
 }
 
 pub(super) fn reset_m4_state() {
@@ -520,12 +537,12 @@ fn build_tool_inventory_response(goal: &[u8], out: &mut [u8]) -> usize {
     if contains_non_ascii(goal) {
         copy_bytes(
             out,
-            "我当前可调用的工具有：fetch_url、post_url、post_tweet、search_recent_posts、get_user_posts、read_session_state、write_session_state、list_workspace、read_file、write_file、apply_patch、run_process、read_process_output。".as_bytes(),
+            "我当前可调用的工具有：fetch_url、post_url、post_tweet、search_web、search_recent_posts、get_user_posts、read_session_state、write_session_state、list_workspace、read_file、write_file、apply_patch、run_process、read_process_output。".as_bytes(),
         )
     } else {
         copy_bytes(
             out,
-            b"My callable tools are: fetch_url, post_url, post_tweet, search_recent_posts, get_user_posts, read_session_state, write_session_state, list_workspace, read_file, write_file, apply_patch, run_process, and read_process_output.",
+            b"My callable tools are: fetch_url, post_url, post_tweet, search_web, search_recent_posts, get_user_posts, read_session_state, write_session_state, list_workspace, read_file, write_file, apply_patch, run_process, and read_process_output.",
         )
     }
 }
@@ -629,6 +646,7 @@ fn trace_fetch_result_snapshot(ok: bool) {
     }
     let status = unsafe { HTTP_STATUS };
     let body_len = unsafe { AGENT_RESPONSE_BODY_LEN };
+    let body_truncated = model::agent_response_body_truncated();
     let transport = fetch_error_reason();
     trace_begin(b"fetch_result_snapshot", unsafe { M4_LOOP_STEP });
     uart::write_str(",\"ok\":");
@@ -637,6 +655,8 @@ fn trace_fetch_result_snapshot(ok: bool) {
     uart::write_u64_dec(status as u64);
     uart::write_str(",\"body_len\":");
     uart::write_u64_dec(body_len as u64);
+    uart::write_str(",\"body_truncated\":");
+    uart::write_str(if body_truncated { "true" } else { "false" });
     if !transport.is_empty() {
         trace_json_string_field(b"transport_reason", transport);
     }
@@ -697,7 +717,7 @@ fn goal_looks_like_summary_request() -> bool {
         || contains_ascii_phrase(goal, goal.len(), b"key point")
 }
 
-fn compact_fetch_preview(out: &mut [u8], src: &[u8]) -> usize {
+fn compact_fetch_preview(out: &mut [u8], src: &[u8], response_truncated: bool) -> usize {
     let mut idx = 0usize;
     idx += copy_bytes(&mut out[idx..], b"Fetched URL content preview:\n");
     let body_limit = if src.len() > M4_FETCH_PREVIEW_LIMIT {
@@ -706,10 +726,29 @@ fn compact_fetch_preview(out: &mut [u8], src: &[u8]) -> usize {
         src.len()
     };
     idx += copy_bytes(&mut out[idx..], &src[..body_limit]);
-    if src.len() > body_limit {
+    if src.len() > body_limit || response_truncated {
         idx += copy_bytes(&mut out[idx..], b"\n...(truncated)");
     }
     idx
+}
+
+fn last_tool_was(name: &[u8]) -> bool {
+    unsafe { starts_with(&M4_TOOL_NAME[..M4_TOOL_NAME_LEN], M4_TOOL_NAME_LEN, name) }
+}
+
+fn latest_tool_result_has_nonempty_search_results() -> bool {
+    let buf = unsafe { &M4_LAST_TOOL_RESULT[..M4_LAST_TOOL_RESULT_LEN] };
+    let len = unsafe { M4_LAST_TOOL_RESULT_LEN };
+    last_tool_was(b"search_web")
+        && len != 0
+        && contains_ascii_phrase(buf, len, b"\"results\":[")
+        && !contains_ascii_phrase(buf, len, b"\"results\":[]")
+}
+
+fn latest_tool_result_is_fetch_preview() -> bool {
+    let buf = unsafe { &M4_LAST_TOOL_RESULT[..M4_LAST_TOOL_RESULT_LEN] };
+    let len = unsafe { M4_LAST_TOOL_RESULT_LEN };
+    len != 0 && starts_with(buf, len, b"Fetched URL content preview:")
 }
 
 fn append_prompt_section_header(prompt: &mut [u8], prompt_len: &mut usize, title: &[u8]) {
@@ -738,7 +777,7 @@ fn append_bounded_prompt_bytes(
 }
 
 fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
-    const INSTRUCTIONS: &[u8] = b"You are the MiniAgentOS M4/M5 session agent. Available tools: fetch_url(url), post_url(url,json), post_tweet(text), search_recent_posts(query), get_user_posts(username), read_session_state(key), write_session_state(key,value), list_workspace(path), read_file(path), write_file(path,content), apply_patch(patch), run_process(path), read_process_output(process_id). You must return only compact JSON with no markdown. If you want to call one tool, return exactly one compact JSON object such as {\"type\":\"tool\",\"tool\":\"fetch_url\",\"url\":\"...\"}, {\"type\":\"tool\",\"tool\":\"post_url\",\"url\":\"...\",\"json\":\"{...}\"}, {\"type\":\"tool\",\"tool\":\"post_tweet\",\"text\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_recent_posts\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"get_user_posts\",\"username\":\"...\"}, {\"type\":\"tool\",\"tool\":\"read_session_state\",\"key\":\"...\"}, {\"type\":\"tool\",\"tool\":\"write_session_state\",\"key\":\"...\",\"value\":\"...\"}, {\"type\":\"tool\",\"tool\":\"list_workspace\",\"path\":\"\"}, {\"type\":\"tool\",\"tool\":\"read_file\",\"path\":\"hello.py\"}, {\"type\":\"tool\",\"tool\":\"write_file\",\"path\":\"hello.py\",\"content\":\"print(\\\"hi\\\")\\n\"}, {\"type\":\"tool\",\"tool\":\"apply_patch\",\"patch\":\"*** Begin Patch\\n*** Update File: hello.py\\n@@\\n-old\\n+new\\n*** End Patch\"}, {\"type\":\"tool\",\"tool\":\"run_process\",\"path\":\"hello.py\"}, or {\"type\":\"tool\",\"tool\":\"read_process_output\",\"process_id\":\"1\"}. If you are done, return {\"type\":\"final\",\"response\":\"...\"}. Use at most one tool call per turn. The Current request section is authoritative and always takes precedence over older conversation. Keep final responses concise and directly answer the user's request. Tool results are compact JSON; inspect them before deciding the next step. For workspace and process tools, stay inside the bounded workspace, prefer list_workspace/read_file before editing, use apply_patch for targeted edits, use write_file for full-file replacement, use run_process only for bounded Python file execution inside the workspace, and after every run_process your next step must be read_process_output for that process_id before any final response. If the user asks you to fix code, make a check pass, verify a change, confirm behavior, compute a result by running code, or create a file and then run it, you must observe the real process result first, and if the observed exit_code is non-zero you must continue by inspecting or editing and then rerunning until you have observed success; do not stop after editing alone and do not ask for confirmation to run if the Current request already asked you to run, compute, verify, or send the result. When a coding request explicitly includes both writing or editing code and then executing, checking, computing, or reporting its output, writing the file is not sufficient: continue through run_process and read_process_output before any final response. Escape newlines inside JSON strings as \\n. If a tool result contains {\"ok\":false,...}, adjust and continue instead of pretending it succeeded. After fetch_url returns content for a summary request, answer with a final response instead of fetching the same URL again unless the user explicitly asks to refetch. Prefer using the Latest tool result section before refetching. For follow-up questions about prior posts or fetched data, prefer read_session_state. For questions about what a specific person or account posted recently, prefer get_user_posts(username). Use search_recent_posts for topic searches, not account timelines. If the user asks something outside the available tools, return a brief final refusal.";
+    const INSTRUCTIONS: &[u8] = b"You are the MiniAgentOS M4/M5/M6 session agent. Available tools: fetch_url(url), post_url(url,json), post_tweet(text), search_web(query), search_recent_posts(query), get_user_posts(username), read_session_state(key), write_session_state(key,value), list_workspace(path), read_file(path), write_file(path,content), apply_patch(patch), run_process(path), read_process_output(process_id). You must return only compact JSON with no markdown. If you want to call one tool, return exactly one compact JSON object such as {\"type\":\"tool\",\"tool\":\"fetch_url\",\"url\":\"...\"}, {\"type\":\"tool\",\"tool\":\"post_url\",\"url\":\"...\",\"json\":\"{...}\"}, {\"type\":\"tool\",\"tool\":\"post_tweet\",\"text\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_web\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_recent_posts\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"get_user_posts\",\"username\":\"...\"}, {\"type\":\"tool\",\"tool\":\"read_session_state\",\"key\":\"...\"}, {\"type\":\"tool\",\"tool\":\"write_session_state\",\"key\":\"...\",\"value\":\"...\"}, {\"type\":\"tool\",\"tool\":\"list_workspace\",\"path\":\"\"}, {\"type\":\"tool\",\"tool\":\"read_file\",\"path\":\"hello.py\"}, {\"type\":\"tool\",\"tool\":\"write_file\",\"path\":\"hello.py\",\"content\":\"print(\\\"hi\\\")\\n\"}, {\"type\":\"tool\",\"tool\":\"apply_patch\",\"patch\":\"*** Begin Patch\\n*** Update File: hello.py\\n@@\\n-old\\n+new\\n*** End Patch\"}, {\"type\":\"tool\",\"tool\":\"run_process\",\"path\":\"hello.py\"}, or {\"type\":\"tool\",\"tool\":\"read_process_output\",\"process_id\":\"1\"}. If you are done, return {\"type\":\"final\",\"response\":\"...\"}. Use at most one tool call per turn. The Current request section is authoritative and always takes precedence over older conversation. Keep final responses concise and directly answer the user's request. Tool results are compact JSON; inspect them before deciding the next step. For web research, use search_web for general web search, treat search results as candidate sources, and fetch at least one supporting URL before answering if the request asks for evidence, comparison, or a sourced answer. If search_web already returned non-empty results, your next step should usually be fetch_url on one of those URLs, not another search_web. If you already fetched supporting page content and it answers a single factual request, return a final sourced answer instead of searching again just to confirm the same fact. Only run search_web again when the earlier search was empty, clearly irrelevant, stale for the user's request, or the user explicitly asked you to broaden, refine, compare additional sources, or get something more recent. Use search_recent_posts only for X topic searches, not general web search or account timelines. For workspace and process tools, stay inside the bounded workspace, prefer list_workspace/read_file before editing, use apply_patch for targeted edits, use write_file for full-file replacement, use run_process only for bounded Python file execution inside the workspace, and after every run_process your next step must be read_process_output for that process_id before any final response. If the user asks you to fix code, make a check pass, verify a change, confirm behavior, compute a result by running code, or create a file and then run it, you must observe the real process result first, and if the observed exit_code is non-zero you must continue by inspecting or editing and then rerunning until you have observed success; do not stop after editing alone and do not ask for confirmation to run if the Current request already asked you to run, compute, verify, or send the result. When a coding request explicitly includes both writing or editing code and then executing, checking, computing, or reporting its output, writing the file is not sufficient: continue through run_process and read_process_output before any final response. Escape newlines inside JSON strings as \\n. If a tool result contains {\"ok\":false,...}, adjust and continue instead of pretending it succeeded. After fetch_url returns content for a summary request, answer with a final response instead of fetching the same URL again unless the user explicitly asks to refetch. Prefer using the Latest tool result section before refetching. For follow-up questions about prior posts or fetched data, prefer read_session_state. For questions about what a specific person or account posted recently, prefer get_user_posts(username). If the user asks something outside the available tools, return a brief final refusal.";
     let prompt: &mut [u8] = unsafe { &mut M4_PROMPT_BUF[..] };
     let mut prompt_len = 0usize;
     let current_goal = unsafe { &AGENT_GOAL_TEXT[..AGENT_GOAL_TEXT_LEN] };
@@ -770,6 +809,28 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
             &mut prompt_len,
             &M4_LAST_TOOL_RESULT[..M4_LAST_TOOL_RESULT_LEN],
             M4_LATEST_TOOL_RESULT_LIMIT,
+            b"(none)",
+        );
+    }
+
+    if latest_tool_result_has_nonempty_search_results() {
+        append_prompt_section_header(prompt, &mut prompt_len, b"Research next-step requirement");
+        append_bounded_prompt_bytes(
+            prompt,
+            &mut prompt_len,
+            b"You already have non-empty search results. Your next step should usually be fetch_url on one of those URLs, not another search_web. Only search again if the result set was empty, clearly irrelevant, stale, or the user explicitly asked you to broaden or refine the search.",
+            384,
+            b"(none)",
+        );
+    }
+
+    if latest_tool_result_is_fetch_preview() {
+        append_prompt_section_header(prompt, &mut prompt_len, b"Research completion requirement");
+        append_bounded_prompt_bytes(
+            prompt,
+            &mut prompt_len,
+            b"You already fetched supporting page content. For a single factual request, if this fetched content answers the question, your next response should be a final answer that cites the fetched URL. Do not call search_web again just to reconfirm the same fact unless the fetched content is empty, missing the needed fact, stale, or the user explicitly asked for broader or additional sources.",
+            448,
             b"(none)",
         );
     }
@@ -819,6 +880,14 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
     if prompt_len > M4_MODEL_INPUT_LIMIT {
         prompt_len = utf8_safe_prefix_len(&prompt[..prompt_len], M4_MODEL_INPUT_LIMIT);
     }
+    trace_model_request_snapshot(
+        b"session_model",
+        crate::openai::model_name(),
+        INSTRUCTIONS,
+        &prompt[..prompt_len],
+        b"low",
+        1400,
+    );
     let mut idx = 0usize;
     idx = copy_bytes(&mut out[idx..], b"{\"model\":\"") + idx;
     idx = json_escape_append(out, idx, crate::openai::model_name());
@@ -828,7 +897,7 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
     idx = json_escape_append(out, idx, &prompt[..prompt_len]);
     idx = copy_bytes(
         &mut out[idx..],
-        b"\",\"reasoning\":{\"effort\":\"minimal\"},\"max_output_tokens\":1400}",
+        b"\",\"reasoning\":{\"effort\":\"low\"},\"max_output_tokens\":1400}",
     ) + idx;
     idx
 }
@@ -1169,6 +1238,17 @@ fn execute_async_tool(tool: &[u8]) -> bool {
         }
         return started;
     }
+    if starts_with(tool, tool.len(), b"search_web") {
+        trace_tool_call_with_arg(b"tool_call_requested", tool, b"query", arg1);
+        trace_tool_call_with_arg(b"tool_call_started", tool, b"query", arg1);
+        let path_len = unsafe { build_m6_search_path(arg1, &mut M4_PATH_BUF) };
+        begin_m5_bridge_tool_phase(b"searching web...");
+        let started = start_m5_bridge_fetch(unsafe { &M4_PATH_BUF[..path_len] });
+        if !started {
+            finalize_m4_reason(fetch_failure_reason_or(b"search_web start failed"));
+        }
+        return started;
+    }
     if starts_with(tool, tool.len(), b"search_recent_posts") {
         trace_tool_call_with_arg(b"tool_call_requested", tool, b"query", arg1);
         if !oauth::bearer_token_ready() {
@@ -1353,6 +1433,14 @@ fn parse_m4_tool_from_response(
         set_tool_call(tool, unsafe { &M4_TOOL_ARG1[..text_len] }, b"");
         return Ok((b"tool", false));
     }
+    if starts_with(tool, tool_len, b"search_web") {
+        let query_len = unsafe { json_extract_string_local(response, b"query", &mut M4_TOOL_ARG1) };
+        if query_len == 0 {
+            return Err(b"missing web search query");
+        }
+        set_tool_call(tool, unsafe { &M4_TOOL_ARG1[..query_len] }, b"");
+        return Ok((b"tool", false));
+    }
     if starts_with(tool, tool_len, b"search_recent_posts") {
         let query_len = unsafe { json_extract_string_local(response, b"query", &mut M4_TOOL_ARG1) };
         if query_len == 0 {
@@ -1502,12 +1590,26 @@ fn parse_m4_model_response() -> Result<(&'static [u8], bool), &'static [u8]> {
         Some(v) if v != 0 => v,
         _ => {
             let preview_len = core::cmp::min(unsafe { AGENT_RESPONSE_BODY_LEN }, 200);
+            trace_model_response_snapshot(
+                b"session_model",
+                unsafe { HTTP_STATUS },
+                model::agent_response_body_truncated(),
+                false,
+                unsafe { &AGENT_RESPONSE_BODY[..preview_len] },
+            );
             trace_model_output_preview(unsafe { &AGENT_RESPONSE_BODY[..preview_len] });
             trace_model_parse_error(b"empty model response");
             return Err(b"empty model response");
         }
     };
     let response = unsafe { &M4_MODEL_TEXT_BUF[..len] };
+    trace_model_response_snapshot(
+        b"session_model",
+        unsafe { HTTP_STATUS },
+        model::agent_response_body_truncated(),
+        true,
+        response,
+    );
     trace_model_output_preview(response);
     let mut kind = [0u8; 32];
     let kind_len = json_extract_string_local(response, b"type", &mut kind);
@@ -1688,6 +1790,7 @@ pub(crate) fn handle_m4_fetch_done(ok: bool) -> bool {
                     return true;
                 }
             }
+            Err(_) if m4_retry_model_parse_error(b"m4_parse") => return true,
             _ => finalize_m4_reason(b"invalid model response"),
         }
         return true;
@@ -1723,9 +1826,24 @@ pub(crate) fn handle_m4_fetch_done(ok: bool) -> bool {
             return true;
         }
         if !model::capture_openai_summary() {
+            let preview_len = core::cmp::min(unsafe { AGENT_RESPONSE_BODY_LEN }, 200);
+            trace_model_response_snapshot(
+                b"summary_model",
+                unsafe { HTTP_STATUS },
+                model::agent_response_body_truncated(),
+                false,
+                unsafe { &AGENT_RESPONSE_BODY[..preview_len] },
+            );
             finalize_m4_reason(b"invalid summary response");
             return true;
         }
+        trace_model_response_snapshot(
+            b"summary_model",
+            unsafe { HTTP_STATUS },
+            model::agent_response_body_truncated(),
+            true,
+            unsafe { &AGENT_SUMMARY[..AGENT_SUMMARY_LEN] },
+        );
         trace_model_turn_completed(b"final_response");
         finalize_m4_response(unsafe { &AGENT_SUMMARY[..AGENT_SUMMARY_LEN] }, false);
         return true;
@@ -1749,8 +1867,9 @@ pub(crate) fn handle_m4_fetch_done(ok: bool) -> bool {
             }
         }
         if unsafe { M4_LAST_TOOL_RESULT_LEN } != 0 {
+            let tool = unsafe { &M4_TOOL_NAME[..M4_TOOL_NAME_LEN] };
             unsafe {
-                M4_USE_HOST_OPENAI_BRIDGE = true;
+                M4_USE_HOST_OPENAI_BRIDGE = m4_bridge_tool_prefers_host_openai(tool);
             }
             m4_schedule_openai_cooldown(M4_M5_BRIDGE_OPENAI_COOLDOWN_MS);
         }
@@ -1766,7 +1885,10 @@ pub(crate) fn handle_m4_fetch_done(ok: bool) -> bool {
 
     let tool = unsafe { &M4_TOOL_NAME[..M4_TOOL_NAME_LEN] };
     let response_truncated = model::agent_response_body_truncated();
-    let ok_status = model::agent_http_success(ok) && !response_truncated;
+    let fetch_partial_ok = phase == AGENT_PHASE_M4_FETCH_URL
+        && model::agent_http_success(ok)
+        && unsafe { AGENT_RESPONSE_BODY_LEN } != 0;
+    let ok_status = model::agent_http_success(ok) && (!response_truncated || fetch_partial_ok);
     unsafe {
         M4_LAST_TOOL_RESULT_LEN = if ok_status {
             capture_raw_response_body()
@@ -1815,6 +1937,7 @@ pub(crate) fn handle_m4_fetch_done(ok: bool) -> bool {
             compact_fetch_preview(
                 &mut M4_LAST_FETCH_BODY,
                 &M4_LAST_TOOL_RESULT[..M4_LAST_TOOL_RESULT_LEN],
+                response_truncated,
             )
         };
         unsafe {

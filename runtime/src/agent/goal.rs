@@ -378,10 +378,17 @@ fn finish_goal_interpretation_failure(reason: &[u8]) {
 fn apply_interpretation_response() -> Result<&'static [u8], &'static [u8]> {
     let response_raw = unsafe { &AGENT_RESPONSE_BODY[..AGENT_RESPONSE_BODY_LEN] };
     let mut openai_text = [0u8; 1024];
-    let response = match model::extract_openai_output_text(&mut openai_text) {
-        Some(len) if len != 0 => &openai_text[..len],
-        _ => response_raw,
+    let (response, parsed_output) = match model::extract_openai_output_text(&mut openai_text) {
+        Some(len) if len != 0 => (&openai_text[..len], true),
+        _ => (response_raw, false),
     };
+    super::trace_model_response_snapshot(
+        b"goal_interpretation",
+        unsafe { HTTP_STATUS },
+        model::agent_response_body_truncated(),
+        parsed_output,
+        response,
+    );
     let mut status = [0u8; 16];
     let status_len = json_extract_string(response, response.len(), b"status", &mut status)
         .ok_or(b"invalid interpretation response" as &'static [u8])?;

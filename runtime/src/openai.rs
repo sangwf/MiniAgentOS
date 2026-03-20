@@ -5,7 +5,7 @@ static mut OPENAI_API_KEY_LEN: usize = 0;
 
 const OPENAI_RESPONSES_URL: &[u8] = b"https://api.openai.com/v1/responses";
 const OPENAI_RESPONSES_HOST: &[u8] = b"api.openai.com";
-const OPENAI_MODEL: &[u8] = b"gpt-5-mini";
+const OPENAI_MODEL: &[u8] = b"gpt-5.4-mini";
 
 pub fn responses_url() -> &'static [u8] {
     OPENAI_RESPONSES_URL

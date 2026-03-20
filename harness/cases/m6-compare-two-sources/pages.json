@@ -1,0 +1,4 @@
+{
+  "/m6/compare-a": "# Tokio Notes\nPosition: tokio lowers tail latency in this fixture.\n",
+  "/m6/compare-b": "# Monoio Notes\nPosition: monoio improves throughput in this fixture.\n"
+}

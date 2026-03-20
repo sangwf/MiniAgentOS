@@ -1,0 +1,42 @@
+{
+  "agent_command": [
+    "make",
+    "run-net-legacy"
+  ],
+  "path_prefixes": [
+    "/opt/homebrew/bin",
+    "$HOME/homebrew/bin",
+    "$HOME/.cargo/bin",
+    "$HOME/.miniagentos/qemu-bottle/qemu/10.2.1/bin"
+  ],
+  "workdir": "runtime",
+  "prompt": "Goal >",
+  "boot_timeout_sec": 120,
+  "case_timeout_sec": 240,
+  "guest_openai_key_env": "OPENAI_API_KEY",
+  "host_search_key_env": "BRAVE_API_KEY",
+  "env": {
+    "MINIOS_USE_HOST_SOCKS5_PROXY": "1",
+    "MINIOS_HOST_SOCKS5_PORT": "10808",
+    "MINIOS_USE_OPENAI_HOST_BRIDGE": "0",
+    "MINIOS_ENABLE_NATIVE_OPENAI_TRANSPORT_REUSE": "0",
+    "MINIOS_DISABLE_AUTO_TLS_LOCAL_FETCH": "1"
+  },
+  "docker_image": "python:3.12-slim",
+  "m5_bridge": {
+    "bind_host": "127.0.0.1",
+    "port": 8090
+  },
+  "result_sink": {
+    "bind_host": "127.0.0.1",
+    "agent_host": "10.0.2.2",
+    "port": 0,
+    "path": "/result"
+  },
+  "source_fixture": {
+    "bind_host": "127.0.0.1",
+    "agent_host": "10.0.2.2",
+    "port": 0,
+    "path": "/source"
+  }
+}

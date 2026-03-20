@@ -1,0 +1,3 @@
+{
+  "/m6/provider": "# M6 Provider\nProvider: Brave Search\nSummary: M6 uses Brave Search through BRAVE_API_KEY.\n"
+}

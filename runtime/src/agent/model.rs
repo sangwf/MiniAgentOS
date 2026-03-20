@@ -246,6 +246,14 @@ pub(crate) fn extract_openai_output_text(out: &mut [u8]) -> Option<usize> {
 
 pub(super) fn build_openai_interpretation_request_body(out: &mut [u8]) -> usize {
     const INSTRUCTIONS: &[u8] = b"You are the in-guest goal interpreter for MiniAgentOS. Supported goals are limited to two families: (1) summarize one URL directly for the user, (2) summarize one URL and post the result to one sink URL. Return only compact JSON. Direct summary => {\"status\":\"ok\",\"action\":\"local_summary\",\"source_url\":\"...\",\"max_items\":3,\"output_language\":\"zh\",\"style\":\"bullet\"}. Posted summary => {\"status\":\"ok\",\"action\":\"post_summary\",\"source_url\":\"...\",\"sink_url\":\"...\",\"max_items\":3,\"output_language\":\"zh\",\"style\":\"bullet\"}. If no explicit output language is requested, use \"default\". If unsupported => {\"status\":\"error\",\"reason\":\"unsupported goal\"}. Treat bullet point takeaways and key points as summary requests. Preserve explicit output language and output style requests as structured fields. If the user gives a bare domain or host without a scheme, normalize it to an https:// URL. Tolerate minor typos such as 'summury' when the intent is clearly to summarize.";
+    super::trace_model_request_snapshot(
+        b"goal_interpretation",
+        crate::openai::model_name(),
+        INSTRUCTIONS,
+        unsafe { &AGENT_GOAL_TEXT[..AGENT_GOAL_TEXT_LEN] },
+        b"low",
+        240,
+    );
     let mut i = 0usize;
     i = copy_bytes(&mut out[i..], b"{\"model\":\"") + i;
     i = json_escape_append(out, i, crate::openai::model_name());
@@ -255,7 +263,7 @@ pub(super) fn build_openai_interpretation_request_body(out: &mut [u8]) -> usize 
     i = json_escape_append(out, i, unsafe { &AGENT_GOAL_TEXT[..AGENT_GOAL_TEXT_LEN] });
     i = copy_bytes(
         &mut out[i..],
-        b"\",\"reasoning\":{\"effort\":\"minimal\"},\"max_output_tokens\":240}",
+        b"\",\"reasoning\":{\"effort\":\"low\"},\"max_output_tokens\":240}",
     ) + i;
     i
 }
@@ -467,6 +475,7 @@ pub(super) fn build_model_request_body(out: &mut [u8]) -> usize {
 
 pub(super) fn build_openai_summary_request_body(out: &mut [u8]) -> usize {
     const SOURCE_LIMIT: usize = 2200;
+    const SUMMARY_INSTRUCTIONS: &[u8] = b"You are the in-guest summary engine for MiniAgentOS. Summarize the provided source into concise bullet points using the requested output language and style hints. Return only the final summary as plain text.";
     let mut i = 0usize;
     i = copy_bytes(&mut out[i..], b"{\"model\":\"") + i;
     i = json_escape_append(out, i, crate::openai::model_name());
@@ -508,10 +517,18 @@ pub(super) fn build_openai_summary_request_body(out: &mut [u8]) -> usize {
             &AGENT_RESPONSE_BODY[..AGENT_RESPONSE_BODY_LEN]
         }
     };
+    super::trace_model_request_snapshot(
+        b"summary_model",
+        crate::openai::model_name(),
+        SUMMARY_INSTRUCTIONS,
+        src,
+        b"low",
+        220,
+    );
     i = json_escape_append(out, i, src);
     i = copy_bytes(
         &mut out[i..],
-        b"\",\"reasoning\":{\"effort\":\"minimal\"},\"max_output_tokens\":220}",
+        b"\",\"reasoning\":{\"effort\":\"low\"},\"max_output_tokens\":220}",
     ) + i;
     i
 }

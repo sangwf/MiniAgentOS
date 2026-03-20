@@ -15,6 +15,8 @@ Current implementation status:
 - `M3`: implemented
 - `M4`: implemented
 - `M5`: implemented in its first bounded form
+- `M6`: partially implemented as bounded web search and research, with fixture
+  and first live harness slices
 
 Milestone 0 is `Boot to Live Agent`:
 
@@ -33,7 +35,7 @@ Milestone 1 is `Governed Skill Runtime`:
 - add a real skill registry
 - enforce per-skill policy and budgets
 - call a real model capability
-- validate a live OpenAI-backed path with `OPENAI_API_KEY` and `gpt-5-mini`
+- validate a live OpenAI-backed path with `OPENAI_API_KEY` and `gpt-5.4-mini`
 - validate success, refusal, and failure in the harness
 - leave the M1 code path in a shape that can be extended without growing one
   giant `runtime/src/main.rs` block
@@ -111,6 +113,23 @@ The first bounded M5 delivery is intentionally narrow:
 - the agent loop supports real inspect/edit/run/observe flows without becoming
   an open shell
 
+Milestone 6 is `Bounded Web Search And Research Runtime`:
+
+- add a bounded `search_web` primitive
+- keep search and fetch as separate runtime capabilities
+- preserve a truthful known-source set across follow-up turns
+- use `BRAVE_API_KEY` for the intended live search path
+- validate the first research loop in the harness before the live runtime path
+  is complete
+
+The repository now includes:
+
+- a fixture-backed `m6` suite for deterministic search/fetch/follow-up
+  validation
+- a first `m6live` QEMU-backed search -> fetch -> answer slice
+
+M6 itself is still not a completed runtime milestone.
+
 The formal milestone specs live in:
 
 - `docs/milestones/m0.md`
@@ -119,6 +138,7 @@ The formal milestone specs live in:
 - `docs/milestones/m3.md`
 - `docs/milestones/m4.md`
 - `docs/milestones/m5.md`
+- `docs/milestones/m6.md`
 
 The fixture agent proves the harness works; it does not count as milestone
 completion for the real runtime.
@@ -132,11 +152,15 @@ completion for the real runtime.
 - `docs/milestones/m3.md`: the M3 spec
 - `docs/milestones/m4.md`: the M4 spec
 - `docs/milestones/m5.md`: the M5 spec
+- `docs/milestones/m6.md`: the M6 spec
 - `docs/schemas/`: task, trace, and intent artifact schema references
 - `harness/`: host-side harness, cases, configs, and fixture services
 - `runtime/`: the real MiniOS runtime being adapted to the M0 harness contract
-- `tools/m5_host_bridge.py`: host-side M5 bridge for workspace and bounded process access
-- `tools/m5_run.py`: one-command manual launcher for the live M5 path
+- `tools/m5_host_bridge.py`: host-side M5/M6 bridge for workspace, bounded
+  process access, and Brave-backed web search
+- `tools/agent_run.py`: one-command manual launcher for the live agent path
+- `tools/m5_run.py`: compatibility wrapper for the older launcher name
+- `tools/view_llm_log.py`: pretty-printer for `llm_api_log.jsonl`
 - `scripts/check.py`: repository validation
 - `bin/check`: lightweight repository checks
 - `bin/qemu-system-aarch64-local`: wrapper around a locally extracted QEMU bottle
@@ -197,7 +221,7 @@ Run the real-model M1 path with OpenAI:
 ./bin/run-case harness/cases/m1-allow-fetch-model-post/task.json --config harness/config.openai.json
 ```
 
-`harness/config.openai.json` uses `OPENAI_API_KEY` and the `gpt-5-mini` model
+`harness/config.openai.json` uses `OPENAI_API_KEY` and the `gpt-5.4-mini` model
 through the current bridge implementation. That config remains useful for M1,
 M2, and prototype M3 coverage, but it no longer defines the official M3 live
 bar.
@@ -229,6 +253,18 @@ Run the real-runtime M5 suite:
 
 ```sh
 ./bin/run-suite --suite m5live --config harness/config.runtime-m5.json
+```
+
+Run the fixture-backed M6 suite:
+
+```sh
+./bin/run-suite --suite m6 --config harness/config.fixture.json
+```
+
+Run the first live-runtime M6 suite:
+
+```sh
+./bin/run-suite --suite m6live --config harness/config.runtime-m6.json
 ```
 
 Run the live OpenAI-backed M4 summarize flow:
@@ -341,24 +377,50 @@ For X/Twitter integration:
 
 The runtime reads those from shell environment variables at build time.
 
-## Manual M5 usage
+## Manual live usage
 
-The shortest supported manual entrypoint for the live bounded coding path is:
+The shortest supported manual entrypoint for the live agent path is:
 
 ```sh
-./tools/m5_run.py
+./tools/agent_run.py
 ```
 
 By default it:
 
 - uses the current directory as the bounded workspace
 - loads `OPENAI_API_KEY` from the current shell or an interactive shell
-- starts the host M5 bridge
+- starts the host bridge
 - launches the runtime with the known-good live M5 environment for this host
 - cleans up any prior launcher-owned bridge/runtime process groups
+- captures guest trace in the background for log artifacts without printing raw TRACE lines by default
+- writes manual runtime artifacts under `output/agent-manual/<timestamp>/`, including:
+  - `uart.log`
+  - `trace.jsonl`
+  - `llm_api_log.jsonl`
+
+The old launcher name `./tools/m5_run.py` still works as a compatibility alias.
 
 On this host, the supported live OpenAI path uses the host SOCKS5 proxy on
-`10808`. `tools/m5_run.py` wires that up for you.
+`10808`. `tools/agent_run.py` wires that up for you.
+
+Pass `--show-trace` when you want raw guest TRACE lines echoed in the terminal.
+Pass `--no-trace-capture` when you want to disable trace capture and live
+`llm_api_log.jsonl` updates entirely.
+
+`llm_api_log.jsonl` records each guest-side LLM request/response pair so you can
+inspect how the runtime constructed the model context (`Current request`,
+`Latest tool result`, `Session state`, `Recent conversation`) and how the model
+responded on each turn.
+
+Use the viewer tool when you want a readable rendering instead of raw JSONL:
+
+```sh
+./tools/view_llm_log.py --latest
+./tools/view_llm_log.py --latest --follow
+./tools/view_llm_log.py --follow-latest
+./tools/view_llm_log.py --latest --full
+./tools/view_llm_log.py --latest --markdown --output /tmp/llm-log.md
+```
 
 A typical manual M5 task now looks like:
 

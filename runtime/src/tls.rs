@@ -7,6 +7,7 @@ use crate::timer;
 const MBEDTLS_ERR_SSL_WANT_READ: i32 = -0x6900;
 const MBEDTLS_ERR_SSL_WANT_WRITE: i32 = -0x6880;
 const MBEDTLS_ERR_SSL_INVALID_MAC: i32 = -0x7180;
+const MBEDTLS_ERR_SSL_INVALID_RECORD: i32 = -0x7200;
 const MBEDTLS_ERR_SSL_CONN_EOF: i32 = -0x7280;
 const MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE: i32 = -0x7780;
 const MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY: i32 = -0x7880;
@@ -14,15 +15,24 @@ const TLS_TX_CHUNK_LEN: usize = 1400;
 
 static mut TLS_INIT: bool = false;
 static mut TLS_HOST_BUF: [u8; 128] = [0u8; 128];
-static mut TLS_RX_BUF: [u8; 65536] = [0u8; 65536];
+static mut TLS_RX_BUF: [u8; 262_144] = [0u8; 262_144];
 static mut TLS_RX_LEN: usize = 0;
 static mut TLS_RX_OFF: usize = 0;
-const TLS_PENDING_SLOTS: usize = 16;
-const TLS_PENDING_MAX: usize = 2048;
+const TLS_PENDING_SLOTS: usize = 32;
+const TLS_PENDING_MAX: usize = 4096;
 static mut TLS_PENDING_BUF: [[u8; TLS_PENDING_MAX]; TLS_PENDING_SLOTS] = [[0u8; TLS_PENDING_MAX]; TLS_PENDING_SLOTS];
 static mut TLS_PENDING_LEN: [usize; TLS_PENDING_SLOTS] = [0usize; TLS_PENDING_SLOTS];
 static mut TLS_PENDING_SEQ: [u32; TLS_PENDING_SLOTS] = [0u32; TLS_PENDING_SLOTS];
 static mut TLS_PENDING_VALID: [bool; TLS_PENDING_SLOTS] = [false; TLS_PENDING_SLOTS];
+static mut TLS_RX_COMPACTIONS: u32 = 0;
+static mut TLS_RX_OVERFLOW_RESETS: u32 = 0;
+static mut TLS_PENDING_STORED: u32 = 0;
+static mut TLS_PENDING_REPLACED: u32 = 0;
+static mut TLS_PENDING_DUP_DROPPED: u32 = 0;
+static mut TLS_PENDING_OVERSIZE_DROPPED: u32 = 0;
+static mut TLS_PENDING_NO_SLOT_DROPPED: u32 = 0;
+static mut TLS_PENDING_REPLAYED: u32 = 0;
+static mut TLS_PENDING_REPLAY_BYTES: u32 = 0;
 
 #[repr(C)]
 struct TlsBio {
@@ -274,6 +284,15 @@ pub fn configure(
             TLS_PENDING_VALID[p] = false;
             p += 1;
         }
+        TLS_RX_COMPACTIONS = 0;
+        TLS_RX_OVERFLOW_RESETS = 0;
+        TLS_PENDING_STORED = 0;
+        TLS_PENDING_REPLACED = 0;
+        TLS_PENDING_DUP_DROPPED = 0;
+        TLS_PENDING_OVERSIZE_DROPPED = 0;
+        TLS_PENDING_NO_SLOT_DROPPED = 0;
+        TLS_PENDING_REPLAYED = 0;
+        TLS_PENDING_REPLAY_BYTES = 0;
         let mut i = 0usize;
         while i < TLS_HOST_BUF.len() && i < domain.len() {
             TLS_HOST_BUF[i] = domain[i];
@@ -335,10 +354,12 @@ pub fn push_rx_payload(addr: usize, len: usize) {
             }
             TLS_RX_LEN = remaining;
             TLS_RX_OFF = 0;
+            TLS_RX_COMPACTIONS = TLS_RX_COMPACTIONS.wrapping_add(1);
         }
         if TLS_RX_LEN + len > TLS_RX_BUF.len() {
             TLS_RX_LEN = 0;
             TLS_RX_OFF = 0;
+            TLS_RX_OVERFLOW_RESETS = TLS_RX_OVERFLOW_RESETS.wrapping_add(1);
             return;
         }
         let dst = TLS_RX_BUF.as_mut_ptr().add(TLS_RX_LEN);
@@ -426,6 +447,9 @@ pub fn push_rx_payload_seq(seq: u32, addr: usize, len: usize) -> bool {
                     let new_len = pending_len - overlap;
                     push_rx_payload(base, new_len);
                     TLS_BIO.ack = TLS_BIO.ack.wrapping_add(new_len as u32);
+                    TLS_PENDING_REPLAYED = TLS_PENDING_REPLAYED.wrapping_add(1);
+                    TLS_PENDING_REPLAY_BYTES =
+                        TLS_PENDING_REPLAY_BYTES.wrapping_add(new_len as u32);
                 }
                 TLS_PENDING_VALID[best_slot] = false;
                 TLS_PENDING_LEN[best_slot] = 0;
@@ -433,26 +457,37 @@ pub fn push_rx_payload_seq(seq: u32, addr: usize, len: usize) -> bool {
             return true;
         }
         if seq.wrapping_sub(expected) < 0x8000_0000 {
-            if len <= TLS_PENDING_MAX {
-                let mut slot = 0usize;
-                while slot < TLS_PENDING_SLOTS {
-                    if TLS_PENDING_VALID[slot] && TLS_PENDING_SEQ[slot] == seq {
-                        return false;
-                    }
-                    slot += 1;
-                }
-                slot = 0;
-                while slot < TLS_PENDING_SLOTS {
-                    if !TLS_PENDING_VALID[slot] {
+            if len > TLS_PENDING_MAX {
+                TLS_PENDING_OVERSIZE_DROPPED = TLS_PENDING_OVERSIZE_DROPPED.wrapping_add(1);
+                return false;
+            }
+            let mut slot = 0usize;
+            while slot < TLS_PENDING_SLOTS {
+                if TLS_PENDING_VALID[slot] && TLS_PENDING_SEQ[slot] == seq {
+                    if len > TLS_PENDING_LEN[slot] {
                         copy_from_rx(addr, len, TLS_PENDING_BUF[slot].as_mut_ptr());
                         TLS_PENDING_LEN[slot] = len;
-                        TLS_PENDING_SEQ[slot] = seq;
-                        TLS_PENDING_VALID[slot] = true;
-                        break;
+                        TLS_PENDING_REPLACED = TLS_PENDING_REPLACED.wrapping_add(1);
+                    } else {
+                        TLS_PENDING_DUP_DROPPED = TLS_PENDING_DUP_DROPPED.wrapping_add(1);
                     }
-                    slot += 1;
+                    return false;
                 }
+                slot += 1;
             }
+            slot = 0;
+            while slot < TLS_PENDING_SLOTS {
+                if !TLS_PENDING_VALID[slot] {
+                    copy_from_rx(addr, len, TLS_PENDING_BUF[slot].as_mut_ptr());
+                    TLS_PENDING_LEN[slot] = len;
+                    TLS_PENDING_SEQ[slot] = seq;
+                    TLS_PENDING_VALID[slot] = true;
+                    TLS_PENDING_STORED = TLS_PENDING_STORED.wrapping_add(1);
+                    return false;
+                }
+                slot += 1;
+            }
+            TLS_PENDING_NO_SLOT_DROPPED = TLS_PENDING_NO_SLOT_DROPPED.wrapping_add(1);
             return false;
         }
     }
@@ -553,11 +588,52 @@ pub fn error_label(code: i32) -> &'static [u8] {
         MBEDTLS_ERR_SSL_WANT_READ => b"want_read",
         MBEDTLS_ERR_SSL_WANT_WRITE => b"want_write",
         MBEDTLS_ERR_SSL_INVALID_MAC => b"invalid_mac",
+        MBEDTLS_ERR_SSL_INVALID_RECORD => b"invalid_record",
         MBEDTLS_ERR_SSL_CONN_EOF => b"conn_eof",
         MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE => b"fatal_alert",
         MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY => b"peer_close_notify",
         _ => b"other",
     }
+}
+
+pub fn rx_compactions() -> u32 {
+    unsafe { TLS_RX_COMPACTIONS }
+}
+
+pub fn rx_overflow_resets() -> u32 {
+    unsafe { TLS_RX_OVERFLOW_RESETS }
+}
+
+pub fn pending_stored() -> u32 {
+    unsafe { TLS_PENDING_STORED }
+}
+
+pub fn pending_replaced() -> u32 {
+    unsafe { TLS_PENDING_REPLACED }
+}
+
+pub fn pending_dup_dropped() -> u32 {
+    unsafe { TLS_PENDING_DUP_DROPPED }
+}
+
+pub fn pending_oversize_dropped() -> u32 {
+    unsafe { TLS_PENDING_OVERSIZE_DROPPED }
+}
+
+pub fn pending_no_slot_dropped() -> u32 {
+    unsafe { TLS_PENDING_NO_SLOT_DROPPED }
+}
+
+pub fn pending_replayed() -> u32 {
+    unsafe { TLS_PENDING_REPLAYED }
+}
+
+pub fn pending_replay_bytes() -> u32 {
+    unsafe { TLS_PENDING_REPLAY_BYTES }
+}
+
+pub fn buffered_bytes() -> usize {
+    unsafe { TLS_RX_LEN.saturating_sub(TLS_RX_OFF) }
 }
 
 pub fn state_label(state: i32) -> &'static [u8] {

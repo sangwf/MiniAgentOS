@@ -51,7 +51,11 @@ const M5_BRIDGE_APPLY_PATCH_PATH: &[u8] = b"/workspace/apply-patch";
 const M5_BRIDGE_RUN_PYTHON_PATH: &[u8] = b"/process/run-python";
 const M5_BRIDGE_OUTPUT_PREFIX: &[u8] = b"/process/output?id=";
 const M5_BRIDGE_OPENAI_RESPONSES_PATH: &[u8] = b"/openai/responses";
+const M6_BRIDGE_SEARCH_PREFIX: &[u8] = b"/search/web?query=";
+const M6_BRIDGE_SEARCH_SUFFIX: &[u8] = b"&top_k=3";
 const M5_PYTHON_RUN_TIMEOUT_SEC: u32 = 5;
+const TLS_RX_YIELD_BYTES: usize = 131_072;
+const TLS_READ_BURST_MAX: usize = 64;
 
 static mut UDP_REPLY_BUF: [u8; 1600] = [0u8; 1600];
 static mut UDP_PAYLOAD_BUF: [u8; 128] = [0u8; 128];
@@ -94,7 +98,8 @@ static mut FETCH_TX_INFLIGHT: bool = false;
 static mut FETCH_HTTP_SENT: bool = false;
 static mut FETCH_HTTP_RETRY: u8 = 0;
 static mut FETCH_HTTP_SEQ: u32 = 0;
-static mut FETCH_HTTP_LEN: u16 = 0;
+static mut FETCH_HTTP_LEN: usize = 0;
+static mut FETCH_HTTP_OFF: usize = 0;
 static mut FETCH_ACK_SENT: bool = false;
 static mut FETCH_DEADLINE_MS: u64 = 0;
 const FETCH_MAX_RETRY: u8 = 5;
@@ -221,7 +226,7 @@ static mut AGENT_TASK_JSON_LEN: usize = 0;
 static mut AGENT_MAX_STEPS: usize = 0;
 static mut AGENT_SUMMARY: [u8; 4096] = [0u8; 4096];
 static mut AGENT_SUMMARY_LEN: usize = 0;
-static mut AGENT_RESPONSE_BODY: [u8; 65536] = [0u8; 65536];
+static mut AGENT_RESPONSE_BODY: [u8; 524288] = [0u8; 524288];
 static mut AGENT_RESPONSE_BODY_LEN: usize = 0;
 static mut AGENT_RESPONSE_BODY_TRUNCATED: bool = false;
 static mut AGENT_OUTPUT_TEXT: [u8; 16384] = [0u8; 16384];
@@ -470,6 +475,14 @@ fn build_m5_output_path(process_id: &[u8], out: &mut [u8]) -> usize {
     let mut idx = 0usize;
     append_bytes(out, &mut idx, M5_BRIDGE_OUTPUT_PREFIX);
     append_urlencoded(out, &mut idx, process_id);
+    idx
+}
+
+fn build_m6_search_path(query: &[u8], out: &mut [u8]) -> usize {
+    let mut idx = 0usize;
+    append_bytes(out, &mut idx, M6_BRIDGE_SEARCH_PREFIX);
+    append_urlencoded(out, &mut idx, query);
+    append_bytes(out, &mut idx, M6_BRIDGE_SEARCH_SUFFIX);
     idx
 }
 
@@ -1389,6 +1402,31 @@ fn handle_uart_line(line: &[u8], len: usize) {
         }
         return;
     }
+    if len > 10 && starts_with(&line[..], len, b"m6-search ") {
+        clear_inline_status();
+        if unsafe { FETCH_STATE } != FETCH_IDLE {
+            uart::write_str("busy\n");
+            return;
+        }
+        let mut start = 10usize;
+        while start < len && is_space(line[start]) {
+            start += 1;
+        }
+        if start >= len {
+            uart::write_str("usage: m6-search <query>\n");
+            return;
+        }
+        let query = &line[start..len];
+        let mut path_buf = [0u8; 512];
+        let path_len = build_m6_search_path(query, &mut path_buf);
+        let started = start_m5_bridge_fetch(&path_buf[..path_len]);
+        if started {
+            uart::write_str("m6 searching web...\n");
+        } else {
+            uart::write_str("m6 bridge fetch failed\n");
+        }
+        return;
+    }
     if (len == 7 && starts_with(&line[..], len, b"m5-list"))
         || (len > 7 && starts_with(&line[..], len, b"m5-list "))
     {
@@ -2153,7 +2191,9 @@ fn send_body_chunks(nb: usize, mac: [u8; 6], data: &[u8], json: bool) {
 fn find_location(buf: &[u8], len: usize) -> Option<(usize, usize)> {
     let mut i = 0usize;
     while i + 9 <= len {
-        if ascii_lower(buf[i]) == b'l'
+        let line_start = i == 0 || buf[i - 1] == b'\n';
+        if line_start
+            && ascii_lower(buf[i]) == b'l'
             && ascii_lower(buf[i + 1]) == b'o'
             && ascii_lower(buf[i + 2]) == b'c'
             && ascii_lower(buf[i + 3]) == b'a'
@@ -2595,6 +2635,7 @@ fn fetch_start_ex(
             FETCH_HTTP_RETRY = 0;
             FETCH_HTTP_SEQ = 0;
             FETCH_HTTP_LEN = 0;
+            FETCH_HTTP_OFF = 0;
             FETCH_ACK_SENT = true;
             FETCH_DEADLINE_MS = 0;
             fetch_set_rounds(0);
@@ -2696,6 +2737,7 @@ fn fetch_start_ex(
         FETCH_HTTP_RETRY = 0;
         FETCH_HTTP_SEQ = 0;
         FETCH_HTTP_LEN = 0;
+        FETCH_HTTP_OFF = 0;
         FETCH_ACK_SENT = false;
         FETCH_DEADLINE_MS = 0;
         fetch_set_rounds(0);
@@ -2975,6 +3017,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                 FETCH_NEXT_MS = 0;
                 FETCH_HTTP_SENT = false;
                 FETCH_HTTP_RETRY = 0;
+                FETCH_HTTP_OFF = 0;
                 FETCH_ACK_SENT = false;
                 FETCH_GOT_RESP = false;
                 FETCH_SOCKS_SENT = false;
@@ -3042,6 +3085,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                     FETCH_NEXT_MS = 0;
                     FETCH_HTTP_SENT = false;
                     FETCH_HTTP_RETRY = 0;
+                    FETCH_HTTP_OFF = 0;
                     FETCH_ACK_SENT = false;
                     FETCH_GOT_RESP = false;
                     FETCH_SOCKS_SENT = false;
@@ -3083,6 +3127,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                     FETCH_NEXT_MS = 0;
                     FETCH_HTTP_SENT = false;
                     FETCH_HTTP_RETRY = 0;
+                    FETCH_HTTP_OFF = 0;
                     FETCH_ACK_SENT = false;
                     FETCH_GOT_RESP = false;
                     FETCH_SOCKS_SENT = false;
@@ -3153,6 +3198,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                     FETCH_NEXT_MS = 0;
                     FETCH_HTTP_SENT = false;
                     FETCH_HTTP_RETRY = 0;
+                    FETCH_HTTP_OFF = 0;
                     FETCH_ACK_SENT = false;
                     FETCH_GOT_RESP = false;
                     FETCH_SOCKS_SENT = false;
@@ -3321,12 +3367,6 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
             if now < unsafe { FETCH_NEXT_MS } {
                 return;
             }
-            if unsafe { FETCH_HTTP_RETRY } >= FETCH_MAX_RETRY {
-                uart::write_str("http send retries exhausted\n");
-                set_fetch_error_reason_if_empty(b"http send retries exhausted");
-                unsafe { FETCH_STATE = FETCH_DONE; }
-                return;
-            }
             if unsafe { FETCH_TX_INFLIGHT } {
                 return;
             }
@@ -3336,16 +3376,54 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
             let path_len = fetch_path_len_raw();
             let domain = unsafe { &FETCH_DOMAIN[..domain_len] };
             let path = unsafe { &FETCH_PATH[..path_len] };
-            let req_len = build_http_request(domain, path, http_buf);
+            let mut req_len = unsafe { FETCH_HTTP_LEN };
+            if req_len == 0 {
+                req_len = build_http_request(domain, path, http_buf);
+                unsafe {
+                    FETCH_HTTP_LEN = req_len;
+                    FETCH_HTTP_OFF = 0;
+                }
+            }
             if req_len == 0 {
                 set_fetch_error_reason(b"http request build failed");
                 unsafe { FETCH_STATE = FETCH_DONE; }
                 return;
             }
+            let off = unsafe { FETCH_HTTP_OFF };
+            if off == 0 {
+                if unsafe { FETCH_HTTP_RETRY } >= FETCH_MAX_RETRY {
+                    uart::write_str("http send retries exhausted\n");
+                    set_fetch_error_reason_if_empty(b"http send retries exhausted");
+                    unsafe { FETCH_STATE = FETCH_DONE; }
+                    return;
+                }
+                unsafe {
+                    FETCH_HTTP_SEQ = FETCH_SEQ;
+                    FETCH_HTTP_RETRY = FETCH_HTTP_RETRY.wrapping_add(1);
+                    FETCH_GOT_RESP = false;
+                }
+            }
+            if off >= req_len {
+                unsafe {
+                    FETCH_HTTP_SENT = true;
+                    FETCH_NEXT_MS = now + 5000;
+                }
+                return;
+            }
+            let max_payload = net::max_tcp_payload_len();
+            if max_payload == 0 {
+                set_fetch_error_reason(b"http payload budget invalid");
+                unsafe { FETCH_STATE = FETCH_DONE; }
+                return;
+            }
+            let mut send_len = req_len - off;
+            if send_len > max_payload {
+                send_len = max_payload;
+            }
             if DEBUG_NET {
                 uart::write_str("tcp send http\n");
             }
-            let seq = unsafe { FETCH_SEQ };
+            let seq = unsafe { FETCH_HTTP_SEQ }.wrapping_add(off as u32);
             let ack = unsafe { FETCH_ACK };
             net::send_tcp(
                 nb,
@@ -3358,19 +3436,16 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                 seq,
                 ack,
                 0x18,
-                &http_buf[..req_len],
+                &http_buf[off..off + send_len],
             );
             let tx_used = net::tx_used_idx();
             unsafe {
-                FETCH_HTTP_SEQ = seq;
-                FETCH_HTTP_LEN = req_len as u16;
-                FETCH_SEQ = FETCH_SEQ.wrapping_add(req_len as u32);
-                FETCH_HTTP_SENT = true;
-                FETCH_HTTP_RETRY = FETCH_HTTP_RETRY.wrapping_add(1);
+                FETCH_SEQ = seq.wrapping_add(send_len as u32);
+                FETCH_HTTP_OFF = off + send_len;
+                FETCH_HTTP_SENT = FETCH_HTTP_OFF >= FETCH_HTTP_LEN;
                 FETCH_TX_USED = tx_used;
                 FETCH_TX_INFLIGHT = true;
-                FETCH_NEXT_MS = now + 5000;
-                FETCH_GOT_RESP = false;
+                FETCH_NEXT_MS = if FETCH_HTTP_SENT { now + 5000 } else { now + 1 };
             }
             return;
         }
@@ -3394,42 +3469,11 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
         if debug_output_enabled() {
             uart::write_str("http retry send\n");
         }
-        let http_buf = unsafe { &mut HTTP_BUF };
-        let domain_len = fetch_domain_len_raw();
-        let path_len = fetch_path_len_raw();
-        let domain = unsafe { &FETCH_DOMAIN[..domain_len] };
-        let path = unsafe { &FETCH_PATH[..path_len] };
-        let mut req_len = unsafe { FETCH_HTTP_LEN } as usize;
-        if req_len == 0 {
-            req_len = build_http_request(domain, path, http_buf);
-            unsafe { FETCH_HTTP_LEN = req_len as u16; }
-        }
-        if req_len == 0 {
-            set_fetch_error_reason(b"http retry request build failed");
-            unsafe { FETCH_STATE = FETCH_DONE; }
-            return;
-        }
-        let seq = unsafe { FETCH_HTTP_SEQ };
-        let ack = unsafe { FETCH_ACK };
-        net::send_tcp(
-            nb,
-            mac,
-            src_ip,
-            unsafe { FETCH_TCP_SRC_PORT },
-            unsafe { FETCH_GW_MAC },
-            unsafe { FETCH_DST_IP },
-                unsafe { FETCH_DST_PORT },
-            seq,
-            ack,
-            0x18,
-            &http_buf[..req_len],
-        );
-        let tx_used = net::tx_used_idx();
         unsafe {
-            FETCH_HTTP_RETRY = FETCH_HTTP_RETRY.wrapping_add(1);
-            FETCH_TX_USED = tx_used;
-            FETCH_TX_INFLIGHT = true;
-            FETCH_NEXT_MS = now + 5000;
+            FETCH_HTTP_SENT = false;
+            FETCH_HTTP_OFF = 0;
+            FETCH_SEQ = FETCH_HTTP_SEQ;
+            FETCH_NEXT_MS = 0;
         }
         return;
     }
@@ -3558,54 +3602,61 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
         return;
     }
     if state == FETCH_TLS_READ {
-        if fetch_http_response_complete() {
-            unsafe { FETCH_STATE = FETCH_DONE; }
-            return;
-        }
-        if now > unsafe { FETCH_NEXT_MS } && unsafe { FETCH_GOT_RESP } {
-            unsafe { FETCH_STATE = FETCH_DONE; }
-            return;
-        }
-        let http_buf = unsafe { &mut HTTP_BUF };
-        let ret = tls::read_step(http_buf);
-        if ret > 0 {
-            let n = if ret as usize > http_buf.len() { http_buf.len() } else { ret as usize };
-            http_feed(nb, mac, &http_buf[..n]);
-            unsafe {
-                FETCH_GOT_RESP = true;
-                FETCH_NEXT_MS = now + 3000;
-                if !FETCH_REPLY_SENT && !FETCH_SUPPRESS_OK && FETCH_SRC_PORT != 0 {
-                    FETCH_REPLY_PENDING = true;
+        let mut burst = 0usize;
+        loop {
+            if fetch_http_response_complete() {
+                unsafe { FETCH_STATE = FETCH_DONE; }
+                return;
+            }
+            if now > unsafe { FETCH_NEXT_MS } && unsafe { FETCH_GOT_RESP } {
+                unsafe { FETCH_STATE = FETCH_DONE; }
+                return;
+            }
+            let http_buf = unsafe { &mut HTTP_BUF };
+            let ret = tls::read_step(http_buf);
+            if ret > 0 {
+                let n = if ret as usize > http_buf.len() { http_buf.len() } else { ret as usize };
+                http_feed(nb, mac, &http_buf[..n]);
+                unsafe {
+                    FETCH_GOT_RESP = true;
+                    FETCH_NEXT_MS = now + 3000;
+                    if !FETCH_REPLY_SENT && !FETCH_SUPPRESS_OK && FETCH_SRC_PORT != 0 {
+                        FETCH_REPLY_PENDING = true;
+                    }
                 }
+                burst += 1;
+                if burst < TLS_READ_BURST_MAX {
+                    continue;
+                }
+                return;
             }
-            return;
-        }
-        if ret == 0 || tls::is_peer_close(ret) {
-            unsafe {
-                FETCH_PEER_CLOSED = true;
+            if ret == 0 || tls::is_peer_close(ret) {
+                unsafe {
+                    FETCH_PEER_CLOSED = true;
+                }
+                unsafe { FETCH_STATE = FETCH_DONE; }
+                return;
             }
+            if tls::want_retry(ret) {
+                return;
+            }
+            let state = tls::state();
+            agent::trace_tls_io_failure(
+                b"https_read",
+                ret,
+                tls::verify_result(),
+                tls::check_pending(),
+                state,
+                tls::state_label(state),
+                tls::error_label(ret),
+            );
+            uart::write_str("tls read err: 0x");
+            uart::write_u64_hex(ret as u64);
+            uart::write_str("\n");
+            set_fetch_error_reason(b"tls read failed");
             unsafe { FETCH_STATE = FETCH_DONE; }
             return;
         }
-        if tls::want_retry(ret) {
-            return;
-        }
-        let state = tls::state();
-        agent::trace_tls_io_failure(
-            b"https_read",
-            ret,
-            tls::verify_result(),
-            tls::check_pending(),
-            state,
-            tls::state_label(state),
-            tls::error_label(ret),
-        );
-        uart::write_str("tls read err: 0x");
-        uart::write_u64_hex(ret as u64);
-        uart::write_str("\n");
-        set_fetch_error_reason(b"tls read failed");
-        unsafe { FETCH_STATE = FETCH_DONE; }
-        return;
     }
 }
 
@@ -3886,6 +3937,30 @@ fn print_tls_status() {
     uart::write_u64_dec(tls::export_client_write_key_aes_zero_hash());
     uart::write_str(" key_aes_hash_static=");
     uart::write_u64_dec(tls::export_client_write_key_aes_zero_hash_static());
+    uart::write_str("\n");
+    uart::write_str("tls buffered_bytes=");
+    uart::write_u64_dec(tls::buffered_bytes() as u64);
+    uart::write_str("\n");
+    uart::write_str("tls rx_compact=");
+    uart::write_u64_dec(tls::rx_compactions() as u64);
+    uart::write_str(" rx_overflow_reset=");
+    uart::write_u64_dec(tls::rx_overflow_resets() as u64);
+    uart::write_str("\n");
+    uart::write_str("tls pending stored=");
+    uart::write_u64_dec(tls::pending_stored() as u64);
+    uart::write_str(" replaced=");
+    uart::write_u64_dec(tls::pending_replaced() as u64);
+    uart::write_str(" dup_drop=");
+    uart::write_u64_dec(tls::pending_dup_dropped() as u64);
+    uart::write_str("\n");
+    uart::write_str("tls pending oversize_drop=");
+    uart::write_u64_dec(tls::pending_oversize_dropped() as u64);
+    uart::write_str(" no_slot_drop=");
+    uart::write_u64_dec(tls::pending_no_slot_dropped() as u64);
+    uart::write_str(" replayed=");
+    uart::write_u64_dec(tls::pending_replayed() as u64);
+    uart::write_str(" replay_bytes=");
+    uart::write_u64_dec(tls::pending_replay_bytes() as u64);
     uart::write_str("\n");
 }
 
@@ -4677,6 +4752,7 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                             FETCH_TCP_ESTABLISHED = true;
                                             FETCH_HTTP_SENT = false;
                                             FETCH_HTTP_RETRY = 0;
+                                            FETCH_HTTP_OFF = 0;
                                             FETCH_GOT_RESP = false;
                                             FETCH_NEXT_MS = now_ms + 50;
                                         }
@@ -4727,6 +4803,7 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                             FETCH_TCP_ESTABLISHED = true;
                                             FETCH_HTTP_SENT = false;
                                             FETCH_HTTP_RETRY = 0;
+                                            FETCH_HTTP_OFF = 0;
                                             FETCH_GOT_RESP = false;
                                             FETCH_NEXT_MS = now_ms + 50;
                                         }
@@ -5023,6 +5100,11 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                 }
                                 if p_len > 0 || (flags & 0x01) != 0 || advanced {
                                     tls::send_ack();
+                                }
+                                if tls::buffered_bytes() >= TLS_RX_YIELD_BYTES {
+                                    // Let fetch_tick() drain TLS records before queued RX
+                                    // packets can overflow the guest-side ciphertext buffer.
+                                    break 'rx;
                                 }
                             }
                         }

@@ -14,12 +14,13 @@ purpose operating system. The harness is a first-class part of the system.
 - `docs/milestones/m3.md`: current Milestone 3 definition
 - `docs/milestones/m4.md`: current Milestone 4 definition
 - `docs/milestones/m5.md`: current Milestone 5 definition
+- `docs/milestones/m6.md`: current Milestone 6 definition
 - `docs/schemas/task.schema.json`: task file reference schema
 - `docs/schemas/trace-event.schema.json`: trace event reference schema
 - `docs/schemas/intent-ir.schema.json`: intent artifact reference schema
 - `harness/config.example.json`: example config for a real QEMU-backed runtime
 - `harness/config.fixture.json`: config used to validate the harness itself
-- `harness/config.openai.json`: real-model config using `OPENAI_API_KEY` and `gpt-5-mini`
+- `harness/config.openai.json`: real-model config using `OPENAI_API_KEY` and `gpt-5.4-mini`
 - `harness/config.runtime-m5.json`: real-runtime M5 config using QEMU, the host M5 bridge, and a live OpenAI path
 - `harness/cases/`: reusable harness cases
 - `harness/fixtures/fake_agent.py`: host-side fixture agent for harness self-test
@@ -27,6 +28,9 @@ purpose operating system. The harness is a first-class part of the system.
 - `harness/lib/run_case.py`: main case runner
 - `harness/lib/evaluator.py`: harness evaluator
 - `runtime/`: the real MiniOS codebase being wired into the harness
+- `tools/agent_run.py`: one-command manual launcher for the live agent path
+- `tools/m5_run.py`: compatibility wrapper for the older manual launcher name
+- `tools/view_llm_log.py`: viewer for readable `llm_api_log.jsonl` rendering
 - `scripts/check.py`: structural repository checks
 - `bin/check`: single command for structural checks
 - `bin/qemu-system-aarch64-local`: wrapper for the local bottle-based QEMU fallback
@@ -47,6 +51,7 @@ purpose operating system. The harness is a first-class part of the system.
 - `./bin/run-suite --suite m4 --config <config>`: run the initial M4 harness surface
 - `./bin/run-suite --suite m5 --config <config>`: run the M5 fixture suite
 - `./bin/run-suite --suite m5live --config <config>`: run the QEMU-backed live M5 suite
+- `./bin/run-suite --suite m6 --config <config>`: run the M6 fixture suite
 - `./bin/validate`: run the default M0 case against the fixture agent
 
 ## Harness Rules
@@ -84,7 +89,7 @@ purpose operating system. The harness is a first-class part of the system.
 - Treat skills as planner-visible and policy-controlled actions.
 - Treat tools as internal reusable capabilities that skills compose.
 - Keep a deterministic mock gateway for regression.
-- Require a live OpenAI-backed path using `OPENAI_API_KEY` and `gpt-5-mini`.
+- Require a live OpenAI-backed path using `OPENAI_API_KEY` and `gpt-5.4-mini`.
 - Add refusal/failure harness coverage without weakening the live-model bar.
 
 ## M2 Direction
@@ -158,3 +163,16 @@ suite. Further expansion is still possible, but M5 is no longer planned-only.
 - Use those capabilities to enable the first real inspect/edit/run/observe
   coding loops.
 - Keep execution and workspace access tightly policy-controlled.
+
+## M6 Direction
+
+Status: partially implemented. M6 now has a fixture-backed research suite and a
+first QEMU-backed live search slice, but follow-up-heavy live research coverage
+is still incomplete.
+
+- Add a bounded web search primitive.
+- Keep search and fetch as distinct runtime capabilities.
+- Introduce a bounded source-set model for follow-up research turns.
+- Use `BRAVE_API_KEY` as the default live search backend secret.
+- Validate search, source selection, multi-source synthesis, and research
+  follow-up behavior in the harness.

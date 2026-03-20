@@ -45,7 +45,7 @@
     "path": "/summarize",
     "error_path": "/summarize-error",
     "backend": "openai",
-    "model": "gpt-5-mini",
+    "model": "gpt-5.4-mini",
     "api_key_env": "OPENAI_API_KEY"
   },
   "interpretation_fixture": {
@@ -55,7 +55,7 @@
     "path": "/interpret",
     "error_path": "/interpret-error",
     "backend": "openai",
-    "model": "gpt-5-mini",
+    "model": "gpt-5.4-mini",
     "api_key_env": "OPENAI_API_KEY"
   },
   "x_fixture": {

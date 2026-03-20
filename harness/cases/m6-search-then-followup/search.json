@@ -1,0 +1,14 @@
+{
+  "queries": {
+    "m6 performance update": [
+      {
+        "id": "r1",
+        "title": "M6 performance update",
+        "source_path": "/m6/performance",
+        "snippet": "The update mentions a bounded search tool and performance claims.",
+        "domain": "fixture.local",
+        "rank": 1
+      }
+    ]
+  }
+}

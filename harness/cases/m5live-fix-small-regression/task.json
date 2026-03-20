@@ -34,6 +34,10 @@
     "expected_tool_calls": [
       {
         "event": "tool_call_requested",
+        "tool": "list_workspace"
+      },
+      {
+        "event": "tool_call_requested",
         "tool": "run_process"
       },
       {
@@ -42,15 +46,7 @@
       },
       {
         "event": "tool_call_requested",
-        "tool": "list_workspace"
-      },
-      {
-        "event": "tool_call_requested",
         "tool": "read_file"
-      },
-      {
-        "event": "tool_call_requested",
-        "tool": "apply_patch"
       },
       {
         "event": "tool_call_requested",

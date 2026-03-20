@@ -76,6 +76,9 @@ def evaluate_case(
     workspace_after=None,
     process_runs=None,
     tool_errors=None,
+    search_results=None,
+    fetched_sources=None,
+    source_memory=None,
 ):
     expect = case_data["expect"]
     failures = []
@@ -84,6 +87,9 @@ def evaluate_case(
     tool_calls = tool_calls or []
     process_runs = process_runs or []
     tool_errors = tool_errors or []
+    search_results = search_results or {}
+    fetched_sources = fetched_sources or {}
+    source_memory = source_memory or {}
 
     guest_exception = observations.get("guest_exception")
     if guest_exception:
@@ -292,6 +298,50 @@ def evaluate_case(
     ):
         failures.append("tool errors did not include the expected ordered subset")
 
+    searches = search_results.get("searches", []) if isinstance(search_results, dict) else []
+    if expect.get("search_results_required") and not searches:
+        failures.append("search_results artifact was not captured")
+    expected_search_count = expect.get("search_count")
+    if expected_search_count is not None and len(searches) != expected_search_count:
+        failures.append(
+            f"unexpected search count: {len(searches)} != {expected_search_count}"
+        )
+    expected_searches = expect.get("expected_searches", [])
+    if expected_searches and not _contains_expected_event_subset(
+        searches, expected_searches
+    ):
+        failures.append("search results did not include the expected ordered subset")
+
+    fetched = fetched_sources.get("sources", []) if isinstance(fetched_sources, dict) else []
+    if expect.get("fetched_sources_required") and not fetched:
+        failures.append("fetched_sources artifact was not captured")
+    expected_fetched_source_count = expect.get("fetched_source_count")
+    if expected_fetched_source_count is not None and len(fetched) != expected_fetched_source_count:
+        failures.append(
+            f"unexpected fetched source count: {len(fetched)} != {expected_fetched_source_count}"
+        )
+    expected_fetched_sources = expect.get("expected_fetched_sources", [])
+    if expected_fetched_sources and not _contains_expected_event_subset(
+        fetched, expected_fetched_sources
+    ):
+        failures.append("fetched sources did not include the expected ordered subset")
+
+    remembered_sources = (
+        source_memory.get("sources", []) if isinstance(source_memory, dict) else []
+    )
+    if expect.get("source_memory_required") and not remembered_sources:
+        failures.append("source_memory artifact was not captured")
+    expected_source_memory_count = expect.get("source_memory_count")
+    if expected_source_memory_count is not None and len(remembered_sources) != expected_source_memory_count:
+        failures.append(
+            f"unexpected source memory count: {len(remembered_sources)} != {expected_source_memory_count}"
+        )
+    expected_source_memory = expect.get("expected_source_memory", [])
+    if expected_source_memory and not _contains_expected_event_subset(
+        remembered_sources, expected_source_memory
+    ):
+        failures.append("source memory did not include the expected ordered subset")
+
     return {
         "pass": not failures,
         "failures": failures,
@@ -305,4 +355,7 @@ def evaluate_case(
         "workspace_after": workspace_after,
         "process_runs": process_runs,
         "tool_errors": tool_errors,
+        "search_results": search_results,
+        "fetched_sources": fetched_sources,
+        "source_memory": source_memory,
     }

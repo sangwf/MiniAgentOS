@@ -1,0 +1,15 @@
+{
+  "queries": {
+    "miniagentos m6 provider": [
+      {
+        "id": "r1",
+        "title": "MiniAgentOS M6 provider note",
+        "source_path": "/m6/provider",
+        "snippet": "M6 uses a dedicated search provider.",
+        "domain": "fixture.local",
+        "rank": 1,
+        "published_at": "2026-03-17"
+      }
+    ]
+  }
+}
