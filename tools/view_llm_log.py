@@ -60,9 +60,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--focus",
-        choices=("all", "request", "response", "system", "input", "output"),
+        choices=("all", "request", "response", "system", "input", "output", "context", "memory"),
         default="all",
         help="Limit the rendered view to one part of the exchange. Default: all.",
+    )
+    parser.add_argument(
+        "--show-context-sections",
+        action="store_true",
+        help="Split request.input into prompt sections such as Working memory and Known sources.",
+    )
+    parser.add_argument(
+        "--show-memory-events",
+        action="store_true",
+        help="Read sibling trace.jsonl and show memory events leading into each model request.",
+    )
+    parser.add_argument(
+        "--show-compaction",
+        action="store_true",
+        help="Read sibling trace.jsonl and show memory compaction events leading into each model request.",
     )
     parser.add_argument(
         "--output",
@@ -259,16 +274,212 @@ def focus_allows(focus: str, section: str) -> bool:
     if focus == "all":
         return True
     if focus == "request":
-        return section in {"request_meta", "system", "input", "raw_request", "budget", "request_diff"}
+        return section in {"request_meta", "system", "input", "context_sections", "trace_budget", "raw_request", "budget", "request_diff"}
     if focus == "response":
         return section in {"response_meta", "output", "raw_response", "budget", "response_diff"}
     if focus == "system":
         return section in {"system", "raw_request", "request_meta", "budget", "request_diff"}
     if focus == "input":
-        return section in {"input", "raw_request", "request_meta", "budget", "request_diff"}
+        return section in {"input", "context_sections", "trace_budget", "raw_request", "request_meta", "budget", "request_diff"}
     if focus == "output":
         return section in {"output", "raw_response", "response_meta", "budget", "response_diff"}
+    if focus == "context":
+        return section in {"system", "input", "context_sections", "trace_budget", "raw_request", "request_meta", "budget", "request_diff"}
+    if focus == "memory":
+        return section in {"context_sections", "trace_budget", "memory_events", "compaction"}
     return True
+
+
+def find_trace_for_log(source: Path) -> Path | None:
+    candidate = source.with_name("trace.jsonl")
+    return candidate if candidate.exists() else None
+
+
+def load_trace_events(path: Path | None) -> list[dict]:
+    if path is None:
+        return []
+    events: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            events.append(obj)
+    return events
+
+
+TOP_LEVEL_SECTION_NAMES = {
+    "Current request",
+    "Latest tool result",
+    "Session state",
+    "Recent conversation",
+    "Working memory",
+    "Known sources",
+    "Workspace memory",
+    "Timely research requirement",
+    "Research completion requirement",
+    "Memory inspection requirement",
+    "Execution requirement",
+}
+
+
+def looks_like_section_header(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped.endswith(":"):
+        return False
+    name = stripped[:-1].strip()
+    if not name or len(name) > 80:
+        return False
+    return name in TOP_LEVEL_SECTION_NAMES
+
+
+def parse_input_sections(text: str) -> list[tuple[str, str]]:
+    if not text:
+        return []
+    sections: list[tuple[str, str]] = []
+    current_name: str | None = None
+    current_lines: list[str] = []
+
+    for raw_line in text.splitlines():
+        if looks_like_section_header(raw_line):
+            if current_name is not None:
+                sections.append((current_name, "\n".join(current_lines).strip("\n")))
+            current_name = raw_line.strip()[:-1].strip()
+            current_lines = []
+            continue
+        if current_name is not None:
+            current_lines.append(raw_line)
+
+    if current_name is not None:
+        sections.append((current_name, "\n".join(current_lines).strip("\n")))
+    return sections
+
+
+def trace_context_section_map(trace_events: list[dict], interaction_id: int) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for event in trace_events:
+        if event.get("event") != "context_section_snapshot":
+            continue
+        if int(event.get("interaction_id", 0) or 0) != interaction_id:
+            continue
+        name = display_text(event.get("name")).strip()
+        if not name:
+            continue
+        result[name] = int(event.get("chars", 0) or 0)
+    return result
+
+
+def trace_budget_for_row(trace_events: list[dict], row: dict, previous_row: dict | None) -> dict | None:
+    request_ts = int(row.get("ts_ms_request", 0) or 0)
+    if request_ts <= 0:
+        return None
+    previous_ts = 0
+    if previous_row is not None:
+        previous_ts = int(previous_row.get("ts_ms_response", 0) or previous_row.get("ts_ms_request", 0) or 0)
+    step = int(row.get("step", 0) or 0)
+    match: dict | None = None
+    for event in trace_events:
+        if event.get("event") != "context_budget_snapshot":
+            continue
+        ts = int(event.get("ts_ms", 0) or 0)
+        if ts <= previous_ts or ts > request_ts:
+            continue
+        if int(event.get("step", 0) or 0) != step:
+            continue
+        match = event
+    return match
+
+
+def trace_memory_window(trace_events: list[dict], row: dict, previous_row: dict | None) -> list[dict]:
+    request_ts = int(row.get("ts_ms_request", 0) or 0)
+    if request_ts <= 0:
+        return []
+    previous_ts = 0
+    if previous_row is not None:
+        previous_ts = int(previous_row.get("ts_ms_response", 0) or previous_row.get("ts_ms_request", 0) or 0)
+    interesting = {"memory_event", "memory_entry_snapshot", "memory_compacted"}
+    return [
+        event
+        for event in trace_events
+        if event.get("event") in interesting
+        and previous_ts < int(event.get("ts_ms", 0) or 0) <= request_ts
+    ]
+
+
+def format_context_sections(input_text: str, trace_events: list[dict], row: dict) -> str:
+    sections = parse_input_sections(input_text)
+    if not sections:
+        return "(no parsed sections)"
+    section_chars = trace_context_section_map(trace_events, int(row.get("interaction_id", 0) or 0))
+    rendered: list[str] = []
+    for name, body in sections:
+        chars_suffix = ""
+        if name in section_chars:
+            chars_suffix = f"  [chars={section_chars[name]}]"
+        rendered.append(f"## {name}{chars_suffix}")
+        rendered.append(body if body else "(empty)")
+        rendered.append("")
+    return "\n".join(rendered).rstrip()
+
+
+def format_trace_budget(event: dict | None) -> str:
+    if not event:
+        return "(trace budget unavailable)"
+    fields = [
+        "instructions_chars",
+        "current_request_chars",
+        "latest_tool_result_chars",
+        "working_memory_chars",
+        "known_sources_chars",
+        "workspace_memory_chars",
+        "session_state_chars",
+        "recent_conversation_chars",
+        "estimated_total_tokens",
+    ]
+    return "\n".join(f"{name}: {int(event.get(name, 0) or 0)}" for name in fields)
+
+
+def format_memory_events(events: list[dict]) -> str:
+    if not events:
+        return "(no memory events in this request window)"
+    lines: list[str] = []
+    for event in events:
+        name = display_text(event.get("event"))
+        if name == "memory_event":
+            lines.append(
+                f"- {display_text(event.get('entry_id'))} [{display_text(event.get('kind'))}] "
+                f"{display_text(event.get('from_state'), '(new)')} -> {display_text(event.get('to_state'))} "
+                f"(turn={display_text(event.get('turn_index'))})"
+            )
+        elif name == "memory_entry_snapshot":
+            summary = display_text(event.get("summary"))
+            lines.append(
+                f"- snapshot {display_text(event.get('id'))} [{display_text(event.get('kind'))}/{display_text(event.get('state'))}] "
+                f"chars={display_text(event.get('chars'))} summary={summary}"
+            )
+        elif name == "memory_compacted":
+            lines.append(
+                f"- compacted {display_text(event.get('entry_id'))} [{display_text(event.get('kind'))}] "
+                f"{display_text(event.get('from_state'), '(n/a)')} -> {display_text(event.get('to_state'))} "
+                f"retained={display_text(event.get('retained_chars'))} dropped={display_text(event.get('dropped_chars'))} "
+                f"mode={display_text(event.get('mode'))}"
+            )
+    return "\n".join(lines)
+
+
+def format_compaction_events(events: list[dict]) -> str:
+    compactions = [event for event in events if event.get("event") == "memory_compacted"]
+    if not compactions:
+        return "(no compaction events in this request window)"
+    return "\n".join(
+        f"- {display_text(event.get('entry_id'))} [{display_text(event.get('kind'))}] "
+        f"retained={display_text(event.get('retained_chars'))} dropped={display_text(event.get('dropped_chars'))} "
+        f"mode={display_text(event.get('mode'))}"
+        for event in compactions
+    )
 
 
 class Colors:
@@ -301,10 +512,14 @@ def render_text_row(
     idx: int,
     previous_row: dict | None,
     source: Path,
+    trace_events: list[dict],
     full: bool,
     raw: bool,
     budget: bool,
     diff: bool,
+    show_context_sections: bool,
+    show_memory_events: bool,
+    show_compaction: bool,
     focus: str,
     color: bool,
     include_source: bool,
@@ -312,6 +527,9 @@ def render_text_row(
     request = as_dict(row.get("request"))
     response = as_dict(row.get("response"))
     request_diff, response_diff = request_response_diffs(previous_row, row)
+    input_text = display_text(request.get("input"))
+    trace_budget = trace_budget_for_row(trace_events, row, previous_row)
+    memory_events = trace_memory_window(trace_events, row, previous_row)
     parts: list[str] = []
     if include_source:
         parts.append(paint(f"Source: {source}", Colors.DIM, enabled=color))
@@ -354,7 +572,23 @@ def render_text_row(
             [
                 "",
                 paint("[INPUT]", Colors.GREEN, Colors.BOLD, enabled=color),
-                display_text(request.get("input")),
+                input_text,
+            ]
+        )
+    if show_context_sections and focus_allows(focus, "context_sections"):
+        parts.extend(
+            [
+                "",
+                paint("[CONTEXT SECTIONS]", Colors.GREEN, Colors.BOLD, enabled=color),
+                format_context_sections(input_text, trace_events, row),
+            ]
+        )
+    if (show_context_sections or focus == "memory" or focus == "context") and focus_allows(focus, "trace_budget"):
+        parts.extend(
+            [
+                "",
+                paint("[TRACE CONTEXT BUDGET]", Colors.MAGENTA, Colors.BOLD, enabled=color),
+                format_trace_budget(trace_budget),
             ]
         )
     if budget and focus_allows(focus, "budget"):
@@ -379,6 +613,22 @@ def render_text_row(
                 "",
                 paint("[REQUEST DIFF]", Colors.BLUE, Colors.BOLD, enabled=color),
                 request_diff,
+            ]
+        )
+    if show_memory_events and focus_allows(focus, "memory_events"):
+        parts.extend(
+            [
+                "",
+                paint("[MEMORY EVENTS]", Colors.BLUE, Colors.BOLD, enabled=color),
+                format_memory_events(memory_events),
+            ]
+        )
+    if show_compaction and focus_allows(focus, "compaction"):
+        parts.extend(
+            [
+                "",
+                paint("[COMPACTION]", Colors.BLUE, Colors.BOLD, enabled=color),
+                format_compaction_events(memory_events),
             ]
         )
     if full:
@@ -431,10 +681,14 @@ def render_text_row(
 def render_text(
     entries: list[tuple[int, dict, dict | None]],
     source: Path,
+    trace_events: list[dict],
     full: bool,
     raw: bool,
     budget: bool,
     diff: bool,
+    show_context_sections: bool,
+    show_memory_events: bool,
+    show_compaction: bool,
     focus: str,
     color: bool = False,
 ) -> str:
@@ -444,10 +698,14 @@ def render_text(
             idx,
             previous_row,
             source,
+            trace_events,
             full,
             raw,
             budget,
             diff,
+            show_context_sections,
+            show_memory_events,
+            show_compaction,
             focus,
             color=color,
             include_source=(display_idx == 0),
@@ -468,15 +726,32 @@ def rows_snapshot(entries: list[tuple[int, dict, dict | None]]) -> str:
 def render_follow_view(
     entries: list[tuple[int, dict, dict | None]],
     source: Path,
+    trace_events: list[dict],
     full: bool,
     raw: bool,
     budget: bool,
     diff: bool,
+    show_context_sections: bool,
+    show_memory_events: bool,
+    show_compaction: bool,
     focus: str,
     color: bool,
     notice: str | None = None,
 ) -> str:
-    body = render_text(entries, source, full, raw, budget, diff, focus, color=color)
+    body = render_text(
+        entries,
+        source,
+        trace_events,
+        full,
+        raw,
+        budget,
+        diff,
+        show_context_sections,
+        show_memory_events,
+        show_compaction,
+        focus,
+        color=color,
+    )
     if notice:
         notice_text = paint(notice, Colors.MAGENTA, Colors.BOLD, enabled=color) + "\n"
     else:
@@ -489,10 +764,14 @@ def render_follow_view(
 def render_markdown(
     entries: list[tuple[int, dict, dict | None]],
     source: Path,
+    trace_events: list[dict],
     full: bool,
     raw: bool,
     budget: bool,
     diff: bool,
+    show_context_sections: bool,
+    show_memory_events: bool,
+    show_compaction: bool,
     focus: str,
 ) -> str:
     parts = [f"# LLM API Log\n\nSource: `{source}`\n"]
@@ -500,6 +779,9 @@ def render_markdown(
         request = as_dict(row.get("request"))
         response = as_dict(row.get("response"))
         request_diff, response_diff = request_response_diffs(previous_row, row)
+        input_text = display_text(request.get("input"))
+        trace_budget = trace_budget_for_row(trace_events, row, previous_row)
+        memory_events = trace_memory_window(trace_events, row, previous_row)
         parts.extend(
             [
                 f"## Turn {idx}",
@@ -533,7 +815,27 @@ def render_markdown(
                     "",
                     "### Input",
                     "```text",
-                    display_text(request.get("input")),
+                    input_text,
+                    "```",
+                ]
+            )
+        if show_context_sections and focus_allows(focus, "context_sections"):
+            parts.extend(
+                [
+                    "",
+                    "### Context Sections",
+                    "```text",
+                    format_context_sections(input_text, trace_events, row),
+                    "```",
+                ]
+            )
+        if (show_context_sections or focus == "memory" or focus == "context") and focus_allows(focus, "trace_budget"):
+            parts.extend(
+                [
+                    "",
+                    "### Trace Context Budget",
+                    "```text",
+                    format_trace_budget(trace_budget),
                     "```",
                 ]
             )
@@ -564,6 +866,26 @@ def render_markdown(
                     "### Request Diff",
                     "```diff",
                     request_diff,
+                    "```",
+                ]
+            )
+        if show_memory_events and focus_allows(focus, "memory_events"):
+            parts.extend(
+                [
+                    "",
+                    "### Memory Events",
+                    "```text",
+                    format_memory_events(memory_events),
+                    "```",
+                ]
+            )
+        if show_compaction and focus_allows(focus, "compaction"):
+            parts.extend(
+                [
+                    "",
+                    "### Compaction",
+                    "```text",
+                    format_compaction_events(memory_events),
                     "```",
                 ]
             )
@@ -620,7 +942,7 @@ def render_markdown(
             )
         if any(
             focus_allows(focus, key)
-            for key in ("system", "input", "budget", "raw_request", "request_diff", "response_meta", "output", "raw_response", "response_diff")
+            for key in ("system", "input", "context_sections", "trace_budget", "memory_events", "compaction", "budget", "raw_request", "request_diff", "response_meta", "output", "raw_response", "response_diff")
         ):
             parts.append("")
     return "\n".join(parts).rstrip() + "\n"
@@ -628,6 +950,12 @@ def render_markdown(
 
 def main() -> int:
     args = parse_args()
+    if args.focus == "context":
+        args.show_context_sections = True
+    elif args.focus == "memory":
+        args.show_context_sections = True
+        args.show_memory_events = True
+        args.show_compaction = True
     if (args.follow or args.follow_latest) and args.output:
         print("--follow/--follow-latest cannot be used with --output", file=sys.stderr)
         return 2
@@ -639,6 +967,8 @@ def main() -> int:
         return 2
     try:
         source = Path(args.file).expanduser().resolve() if args.file else find_latest_log(REPO_ROOT)
+        trace_source = find_trace_for_log(source)
+        trace_events = load_trace_events(trace_source)
         all_rows = load_rows(source)
         entries = build_view_entries(all_rows, args.turn)
     except FileNotFoundError as exc:
@@ -661,10 +991,14 @@ def main() -> int:
                 render_follow_view(
                     entries,
                     source,
+                    trace_events,
                     args.full,
                     args.raw,
                     args.budget,
                     args.diff,
+                    args.show_context_sections,
+                    args.show_memory_events,
+                    args.show_compaction,
                     args.focus,
                     color=color,
                 )
@@ -680,16 +1014,22 @@ def main() -> int:
                     latest_source = find_latest_log(REPO_ROOT)
                     if latest_source != source:
                         source = latest_source
+                        trace_source = find_trace_for_log(source)
+                        trace_events = load_trace_events(trace_source)
                         all_rows = load_rows(source)
                         entries = build_view_entries(all_rows, args.turn)
                         sys.stdout.write(
                             render_follow_view(
                                 entries,
                                 source,
+                                trace_events,
                                 args.full,
                                 args.raw,
                                 args.budget,
                                 args.diff,
+                                args.show_context_sections,
+                                args.show_memory_events,
+                                args.show_compaction,
                                 args.focus,
                                 color=color,
                                 notice=f"[viewer] switched to newer log: {source}",
@@ -701,6 +1041,7 @@ def main() -> int:
                         previous_entries = entries
                         continue
                 current_all_rows = load_rows(source)
+                trace_events = load_trace_events(trace_source)
                 current_entries = build_view_entries(current_all_rows, args.turn)
                 current_snapshot = rows_snapshot(current_entries)
                 if len(current_entries) < last_len:
@@ -708,10 +1049,14 @@ def main() -> int:
                         render_follow_view(
                             current_entries,
                             source,
+                            trace_events,
                             args.full,
                             args.raw,
                             args.budget,
                             args.diff,
+                            args.show_context_sections,
+                            args.show_memory_events,
+                            args.show_compaction,
                             args.focus,
                             color=color,
                             notice=f"[viewer] log was truncated or restarted: {source}",
@@ -736,10 +1081,14 @@ def main() -> int:
                                 idx,
                                 previous_row,
                                 source,
+                                trace_events,
                                 args.full,
                                 args.raw,
                                 args.budget,
                                 args.diff,
+                                args.show_context_sections,
+                                args.show_memory_events,
+                                args.show_compaction,
                                 args.focus,
                                 color=color,
                                 include_source=(last_len == 0 and display_idx == 0),
@@ -751,10 +1100,14 @@ def main() -> int:
                         render_follow_view(
                             current_entries,
                             source,
+                            trace_events,
                             args.full,
                             args.raw,
                             args.budget,
                             args.diff,
+                            args.show_context_sections,
+                            args.show_memory_events,
+                            args.show_compaction,
                             args.focus,
                             color=color,
                         )
@@ -767,9 +1120,34 @@ def main() -> int:
             return 0
 
     rendered = (
-        render_markdown(entries, source, args.full, args.raw, args.budget, args.diff, args.focus)
+        render_markdown(
+            entries,
+            source,
+            trace_events,
+            args.full,
+            args.raw,
+            args.budget,
+            args.diff,
+            args.show_context_sections,
+            args.show_memory_events,
+            args.show_compaction,
+            args.focus,
+        )
         if args.markdown
-        else render_text(entries, source, args.full, args.raw, args.budget, args.diff, args.focus, color=use_color(args.color))
+        else render_text(
+            entries,
+            source,
+            trace_events,
+            args.full,
+            args.raw,
+            args.budget,
+            args.diff,
+            args.show_context_sections,
+            args.show_memory_events,
+            args.show_compaction,
+            args.focus,
+            color=use_color(args.color),
+        )
     )
 
     if args.output:

@@ -218,6 +218,87 @@
 - The "viewer did not refresh" bug was in the viewer, not the log writer. A
   manual LLM turn is first written as a row with a request and no response, and
   then rewritten in place with the response once the matching
+  `model_response_snapshot` arrives. Watching only line count changes is not
+  enough; the viewer must also detect in-place row rewrites.
+- After M7, `llm_api_log.jsonl` alone is not enough to understand context
+  assembly. The guest emits the most useful memory/context signals only in the
+  sibling `trace.jsonl`:
+  - `context_section_snapshot`
+  - `context_budget_snapshot`
+  - `memory_event`
+  - `memory_entry_snapshot`
+  - `memory_compacted`
+- A context-engineering viewer therefore needs to join two artifact streams:
+  the API request/response log for wire-level truth, and the runtime trace for
+  section budgets, retained-memory state, and compaction provenance.
+- Free-form section parsing on `request.input` is too permissive once fetched
+  previews and tool echoes contain their own colon-suffixed labels. Without a
+  top-level section allowlist, viewer output can incorrectly promote
+  `Fetched URL content preview:` or `Tool[fetch_url]:` into fake prompt layers.
+- The right parser behavior for the current M4/M5/M6/M7 contract is to only
+  recognize real top-level prompt sections such as:
+  - `Current request`
+  - `Latest tool result`
+  - `Working memory`
+  - `Known sources`
+  - `Workspace memory`
+  - `Session state`
+  - `Recent conversation`
+  plus dynamic requirement sections like `Timely research requirement`,
+  `Research completion requirement`, `Memory inspection requirement`, and
+  `Execution requirement`.
+- For actual interactive use, `focus=context` and `focus=memory` need implied
+  defaults. Requiring the user to also remember `--show-context-sections`,
+  `--show-memory-events`, and `--show-compaction` makes the viewer less useful
+  as a fast context-engineering tool.
+
+## 2026-03-20 Manual Research Follow-Up
+
+- The repeated `dns parse fail` seen on manual research prompts such as
+  `美元最近的利率变化` was not caused by the DNS parser itself. The real bug was
+  in the fetch state machine: fixed-IP requests (for example `search_web`
+  hitting the host bridge at `10.0.2.2`) were initialized correctly, but
+  several timeout/ARP/retry branches in `runtime/src/main.rs` ignored
+  `FETCH_HAVE_FIXED_IP` and reset those requests back to `FETCH_DNS`.
+- The affected branches included:
+  - the overall request-deadline retry path
+  - the `FETCH_ARP` "gateway learned" transition
+  - the `FETCH_ARP` retry-exhaustion path
+  - the `FETCH_DNS` retry-exhaustion path
+  - the `FETCH_SYN` retry-exhaustion path
+- The right fix is to centralize transport restart semantics:
+  - `fetch_restart_transport_state()`
+  - `fetch_resume_after_gateway_ready()`
+  so fixed-IP requests always return to `FETCH_SYN`, while only non-fixed-IP
+  requests fall back to `FETCH_DNS` or `FETCH_ARP`.
+- After that runtime fix, the original `dns parse fail` disappeared completely
+  from the manual repro trace. The next exposed issue was different:
+  `search_web` still timed out in `tcp_connect`.
+- That second failure was not in the guest network stack. It was a manual
+  launcher bug: `tools/m5_run.py` started the host bridge on `args.bridge_port`
+  (default `8090`) but still inherited `MINIOS_HOST_BRIDGE_PORT=18090` from
+  `harness/config.runtime-m5.json` when building the guest binary. The guest was
+  therefore trying to connect to the wrong bridge port on `10.0.2.2`.
+- `tools/m5_run.py` now explicitly exports
+  `MINIOS_HOST_BRIDGE_PORT=str(args.bridge_port)` before building/running the
+  runtime, so the guest and host bridge agree on the same manual port.
+- Manual cleanup also had a secondary launcher bug: stale `current.json` state
+  could cause `PermissionError` from `os.killpg(...)`, aborting startup before a
+  new manual run began. The launcher now treats that as a warning and continues.
+- With both fixes in place, the manual repro `美元最近的利率变化` now completes
+  end-to-end:
+  - `search_web` succeeds over the fixed-IP host bridge
+  - `fetch_url` succeeds on the selected result
+  - the final answer is rendered normally to UART
+- The final successful manual answer used the Trading Economics source and
+  returned:
+  - the recent U.S. federal funds rate record as `3.75%`
+  - the target range as approximately `3.50%-3.75%`
+- Regression validation after these fixes:
+  - `./bin/check` passed
+  - `./bin/run-suite --suite m5live --config harness/config.runtime-m5.json` passed
+  - `./bin/run-suite --suite m6live --config harness/config.runtime-m6.json` passed
+  - `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json` passed
   `model_response_snapshot` arrives. The old `--follow` logic only watched row
   count, so it missed in-place row updates where the line count stayed the same.
 
@@ -441,3 +522,67 @@
   - `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json`
     passed
   - `./bin/check` passed
+
+## 2026-03-20 Timely Research Regression And Live Harness Crosstalk
+
+- The raw-JSON leak for time-sensitive research prompts was a parser-contract
+  weakness, not a search backend failure:
+  - the model could emit a bare object like `{"query":"..."}` without the
+    required `type/tool` fields
+  - the old parser path could let malformed JSON shape leak to UART instead of
+    coercing it into an explicit tool call or rejecting it truthfully
+- New current-subject research follow-ups still needed stronger prompt control:
+  - after one time-sensitive rates/market/public-view query, a later query
+    about a related but different subject could still answer from stale prior
+    context
+  - the live fix was to make new time-sensitive subjects explicitly re-run
+    `search_web`, unless the user clearly referenced the same prior source or
+    result
+- Long live search-result URLs were hitting guest fetch path limits:
+  - the previous `FETCH_PATH` / redirect path buffers were too small
+  - enlarging the domain/path buffers in `runtime/src/main.rs` removed
+    `url path too long` failures for real fetched search results
+- The `m5live` failures turned out not to be a core coding-loop regression:
+  - the user’s manual `agent_run.py` was already holding `127.0.0.1:8090`
+  - the live suite also tried to launch its bridge on `8090`
+  - `run_case.py` would happily wait for `/healthz` on that port, so the suite
+    silently bound itself to the *manual* workspace instead of the case
+    workspace
+  - that is why `m5live-run-process-and-read-output` ran repo-root `hello.py`
+    and why `m5live-fix-small-regression` wandered around `.git`
+- The right live-harness fix was two-part:
+  - make the guest bridge port build-time configurable through
+    `MINIOS_HOST_BRIDGE_PORT`
+  - fail fast if the spawned bridge process exits early on an already-occupied
+    port
+- Multi-line final answers in live research were being mis-evaluated by the
+  harness:
+  - `_extract_terminal_result()` used to stop on the first blank line while
+    scanning backwards from completion
+  - that truncated answers like:
+    - factual line
+    - blank line
+    - `Source: ...`
+  - the harness then kept only the `Source:` line and missed the actual answer
+- The first guest-side M7 truthful-compaction live case needed stronger
+  prompting for explicit memory inspection:
+  - when the user explicitly asked to inspect `mem-source`, the model could
+    answer from retained summaries directly after `fetch_url`
+  - adding a dedicated `Memory inspection requirement` prompt section made the
+    next step explicitly use `read_memory` / `list_memory` / `memory_status`
+    before answering
+- Validation after these fixes:
+  - `./bin/run-suite --suite m5live --config harness/config.runtime-m5.json`
+    passed
+  - `./bin/run-suite --suite m6live --config harness/config.runtime-m6.json`
+    passed
+  - `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json`
+    passed
+  - `./bin/run-suite --suite m5 --config harness/config.fixture.json` passed
+  - `./bin/run-suite --suite m6 --config harness/config.fixture.json` passed
+  - `./bin/run-suite --suite m7 --config harness/config.fixture.json` passed
+  - `./bin/check` passed
+  - `./bin/run-suite --suite m4 --config harness/config.fixture.json` still
+    holds the same two known failures:
+    - `m4-loop-context-bleed-repro`
+    - `m4-loop-openai-followup`

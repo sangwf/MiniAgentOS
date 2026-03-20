@@ -218,7 +218,7 @@ def _extract_terminal_result(uart_text: str, trace_events: list[dict]) -> dict |
                 line = lines[index].rstrip()
                 if not line:
                     if summary_lines:
-                        break
+                        summary_lines.append("")
                     continue
                 if line.startswith("TRACE ") or line.startswith("Goal >"):
                     if summary_lines:
@@ -621,6 +621,10 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
             bufsize=0,
         )
         _wait_for_http_ok(f"http://{bridge_bind_host}:{bridge_port}/healthz", 10.0)
+        if bridge_proc.poll() is not None:
+            raise RuntimeError(
+                f"m5 bridge exited early on port {bridge_port}; this usually means the port is already in use"
+            )
 
     sink_agent_url = "http://{host}:{port}{path}".format(
         host=sink_cfg["agent_host"],

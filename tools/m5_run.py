@@ -118,16 +118,23 @@ def terminate_process_group(pgid: int | None, name: str, timeout_sec: float = 5.
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
         return
+    except PermissionError:
+        print(f"warning: insufficient permission to stop process group for {name}", file=sys.stderr)
+        return
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         try:
             os.killpg(pgid, 0)
         except ProcessLookupError:
             return
+        except PermissionError:
+            return
         time.sleep(0.1)
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
+        return
+    except PermissionError:
         return
 
 
@@ -256,6 +263,7 @@ def main() -> int:
     env["MINIOS_USE_OPENAI_HOST_BRIDGE"] = "0"
     env["MINIOS_ENABLE_NATIVE_OPENAI_TRANSPORT_REUSE"] = "0"
     env["MINIOS_DISABLE_AUTO_TLS_LOCAL_FETCH"] = "1"
+    env["MINIOS_HOST_BRIDGE_PORT"] = str(args.bridge_port)
 
     logs_root = repo_root / "output" / "agent-manual" / time.strftime("%Y%m%d-%H%M%S")
     logs_root.mkdir(parents=True, exist_ok=True)

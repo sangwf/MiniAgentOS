@@ -130,3 +130,36 @@ opaque prompt growth.
 - M7 is still partial overall because checkpoint/resume are still fixture-only,
   and the guest-side compaction policy is still a bounded first slice rather
   than the final durable memory runtime.
+
+## 2026-03-20 Timely Research And Live Harness Stabilization
+
+| Step | Status | Notes |
+| --- | --- | --- |
+| Reproduce the bad timely-research turn behavior | completed | Confirmed the remaining issue on a temporary live debug case: a new current-subject research question could still reuse stale prior context, and long fetched result URLs could fail as `url path too long` |
+| Harden M4/M5/M6 parser and prompt routing | completed | Tightened tool-call parsing in `runtime/src/agent/loop.rs`, coerced bare `{query:...}` objects into explicit tool calls, and added a `Timely research requirement` prompt section so new time-sensitive subjects re-run `search_web` instead of reusing stale context |
+| Raise fetch URL/path limits for live research | completed | Increased fetch and redirect domain/path buffers in `runtime/src/main.rs` so long search-result URLs no longer fail as `url path too long` |
+| Repair direct process-output finalization | completed | Narrowed direct-output finalization to explicit “send/show stdout” requests and return raw stdout for pure stdout runs, which restored `m5live-run-process-and-read-output` expectations |
+| Isolate live harness bridge ports from manual agent runs | completed | Added build-time `MINIOS_HOST_BRIDGE_PORT`, switched `runtime` to use `HOST_M5_BRIDGE_PORT`, updated live configs to distinct ports, and made `run_case.py` fail fast if the bridge process exits early on a claimed port |
+| Fix multiline terminal-summary extraction | completed | Updated `harness/lib/run_case.py` so terminal summaries preserve multi-line answers instead of truncating at the last non-empty line |
+| Stabilize explicit memory-inspection live prompting | completed | Added a `Memory inspection requirement` dynamic prompt section so requests that explicitly ask to inspect `mem-*` entries call `read_memory` instead of answering from inferred retained summaries alone |
+| Remove the temporary debug-only case | completed | Deleted `harness/cases/debug-m6-timely-research/` after the fix was validated |
+| Re-run live and fixture regressions | completed | Passed `m5live`, `m6live`, `m7live`, `m5`, `m6`, `m7`, and `check`; `m4` remains at the two known failures only |
+
+## 2026-03-20 Manual Research DNS/Bridge Follow-Up
+
+| Step | Status | Notes |
+| --- | --- | --- |
+| Reproduce the `dns parse fail` manual research prompt | completed | Confirmed `Goal > 美元最近的利率变化` could push `search_web` into repeated `dns parse fail` and later `network request timed out` on the manual path |
+| Fix fixed-IP retry handling in the fetch state machine | completed | Added helpers in `runtime/src/main.rs` so fixed-IP requests keep `FETCH_SYN` across ARP/timeout/retry branches instead of being reset to `FETCH_DNS` |
+| Fix manual launcher bridge-port mismatch | completed | `tools/m5_run.py` now exports `MINIOS_HOST_BRIDGE_PORT=args.bridge_port` so the guest binary and host bridge agree on the manual bridge port |
+| Harden stale manual cleanup | completed | `tools/m5_run.py` now tolerates `PermissionError` from `killpg` when cleaning an old `current.json` state file |
+| Revalidate manual and live paths | completed | Manual `美元最近的利率变化` now completes with a sourced answer; `check`, `m5live`, `m6live`, and `m7live` all pass |
+
+## 2026-03-20 M7-Aware LLM Log Viewer
+
+| Step | Status | Notes |
+| --- | --- | --- |
+| Inspect current viewer gaps against M7 trace | completed | Confirmed `view_llm_log.py` could read `llm_api_log.jsonl` but did not surface `context_section_snapshot`, `context_budget_snapshot`, `memory_event`, or `memory_compacted` from sibling `trace.jsonl` |
+| Add trace-aware context and memory rendering | completed | Extended `tools/view_llm_log.py` to auto-load sibling `trace.jsonl`, render `CONTEXT SECTIONS`, `TRACE CONTEXT BUDGET`, `MEMORY EVENTS`, and `COMPACTION`, and add `focus=context|memory` plus dedicated flags |
+| Harden section parsing and focus ergonomics | completed | Restricted prompt-section parsing to real top-level M4/M5/M6/M7 section names so fetched previews do not get split into fake sections; also made `--focus context` and `--focus memory` auto-enable the relevant views |
+| Revalidate viewer and repository structure | completed | Passed `python3 -m py_compile tools/view_llm_log.py` and `./bin/check`, and spot-checked the latest manual log with `--focus context` / `--focus memory` |

@@ -467,19 +467,123 @@ fn request_authorizes_bounded_python_execution(buf: &[u8], len: usize) -> bool {
 }
 
 fn request_prefers_direct_process_output(buf: &[u8], len: usize) -> bool {
-    contains_ascii_phrase(buf, len, b"tell me")
-        || contains_ascii_phrase(buf, len, b"show me")
-        || contains_ascii_phrase(buf, len, b"send me")
-        || contains_ascii_phrase(buf, len, b"return the output")
+    contains_ascii_phrase(buf, len, b"stdout")
         || contains_ascii_phrase(buf, len, b"what it prints")
-        || contains_ascii_phrase(buf, len, b"compute")
-        || contains_ascii_phrase(buf, len, b"result")
-        || contains_ascii_phrase(buf, len, b"output")
+        || contains_ascii_phrase(buf, len, b"what it printed")
+        || contains_ascii_phrase(buf, len, b"exactly what stdout says")
+        || contains_ascii_phrase(buf, len, b"return the output")
+        || contains_ascii_phrase(buf, len, b"show me the output")
+        || contains_ascii_phrase(buf, len, b"send me the output")
+        || contains_ascii_phrase(buf, len, b"send me the result")
         || contains_bytes_phrase(buf, len, "发给我".as_bytes())
-        || contains_bytes_phrase(buf, len, "告诉我".as_bytes())
-        || contains_bytes_phrase(buf, len, "输出".as_bytes())
-        || contains_bytes_phrase(buf, len, "结果".as_bytes())
-        || contains_bytes_phrase(buf, len, "计算".as_bytes())
+        || contains_bytes_phrase(buf, len, "输出给我".as_bytes())
+        || contains_bytes_phrase(buf, len, "运行结果发给我".as_bytes())
+        || contains_bytes_phrase(buf, len, "输出结果发给我".as_bytes())
+        || contains_bytes_phrase(buf, len, "把结果发给我".as_bytes())
+        || contains_bytes_phrase(buf, len, "把运行结果".as_bytes())
+        || contains_bytes_phrase(buf, len, "它输出什么".as_bytes())
+}
+
+fn request_mentions_x_topic(buf: &[u8], len: usize) -> bool {
+    contains_ascii_phrase(buf, len, b"twitter")
+        || contains_ascii_phrase(buf, len, b"tweet")
+        || contains_ascii_phrase(buf, len, b"x post")
+        || contains_ascii_phrase(buf, len, b"x.com")
+        || contains_bytes_phrase(buf, len, "推特".as_bytes())
+        || contains_bytes_phrase(buf, len, "推文".as_bytes())
+        || contains_bytes_phrase(buf, len, "发帖".as_bytes())
+}
+
+fn request_requires_explicit_memory_inspection(buf: &[u8], len: usize) -> bool {
+    contains_ascii_phrase(buf, len, b"read_memory")
+        || contains_ascii_phrase(buf, len, b"memory_status")
+        || contains_ascii_phrase(buf, len, b"memory status")
+        || contains_ascii_phrase(buf, len, b"memory-status")
+        || contains_ascii_phrase(buf, len, b"list_memory")
+        || contains_ascii_phrase(buf, len, b"memory list")
+        || contains_ascii_phrase(buf, len, b"memory-list")
+        || contains_ascii_phrase(buf, len, b"memory read")
+        || contains_ascii_phrase(buf, len, b"memory-read")
+        || contains_ascii_phrase(buf, len, b"mem-")
+        || contains_bytes_phrase(buf, len, "记忆".as_bytes())
+        || contains_bytes_phrase(buf, len, "内存".as_bytes())
+}
+
+fn request_has_timely_marker(buf: &[u8], len: usize) -> bool {
+    contains_ascii_phrase(buf, len, b"latest")
+        || contains_ascii_phrase(buf, len, b"recent")
+        || contains_ascii_phrase(buf, len, b"current")
+        || contains_ascii_phrase(buf, len, b"today")
+        || contains_ascii_phrase(buf, len, b"now")
+        || contains_ascii_phrase(buf, len, b"up or down")
+        || contains_bytes_phrase(buf, len, "最近".as_bytes())
+        || contains_bytes_phrase(buf, len, "最新".as_bytes())
+        || contains_bytes_phrase(buf, len, "当前".as_bytes())
+        || contains_bytes_phrase(buf, len, "目前".as_bytes())
+        || contains_bytes_phrase(buf, len, "今天".as_bytes())
+        || contains_bytes_phrase(buf, len, "近期".as_bytes())
+        || contains_bytes_phrase(buf, len, "刚刚".as_bytes())
+        || contains_bytes_phrase(buf, len, "刚才".as_bytes())
+}
+
+fn request_has_research_subject_marker(buf: &[u8], len: usize) -> bool {
+    contains_ascii_phrase(buf, len, b"interest rate")
+        || contains_ascii_phrase(buf, len, b"rates")
+        || contains_ascii_phrase(buf, len, b"federal reserve")
+        || contains_ascii_phrase(buf, len, b"fed")
+        || contains_ascii_phrase(buf, len, b"tariff")
+        || contains_ascii_phrase(buf, len, b"market")
+        || contains_ascii_phrase(buf, len, b"price")
+        || contains_ascii_phrase(buf, len, b"bank")
+        || contains_ascii_phrase(buf, len, b"gold")
+        || contains_ascii_phrase(buf, len, b"yield")
+        || contains_ascii_phrase(buf, len, b"statement")
+        || contains_ascii_phrase(buf, len, b"viewpoint")
+        || contains_ascii_phrase(buf, len, b"opinion")
+        || contains_ascii_phrase(buf, len, b"news")
+        || contains_bytes_phrase(buf, len, "利率".as_bytes())
+        || contains_bytes_phrase(buf, len, "汇率".as_bytes())
+        || contains_bytes_phrase(buf, len, "银行".as_bytes())
+        || contains_bytes_phrase(buf, len, "黄金".as_bytes())
+        || contains_bytes_phrase(buf, len, "金价".as_bytes())
+        || contains_bytes_phrase(buf, len, "价格".as_bytes())
+        || contains_bytes_phrase(buf, len, "市场".as_bytes())
+        || contains_bytes_phrase(buf, len, "走势".as_bytes())
+        || contains_bytes_phrase(buf, len, "波动".as_bytes())
+        || contains_bytes_phrase(buf, len, "降息".as_bytes())
+        || contains_bytes_phrase(buf, len, "加息".as_bytes())
+        || contains_bytes_phrase(buf, len, "美联储".as_bytes())
+        || contains_bytes_phrase(buf, len, "央行".as_bytes())
+        || contains_bytes_phrase(buf, len, "新闻".as_bytes())
+        || contains_bytes_phrase(buf, len, "消息".as_bytes())
+        || contains_bytes_phrase(buf, len, "表态".as_bytes())
+        || contains_bytes_phrase(buf, len, "观点".as_bytes())
+        || contains_bytes_phrase(buf, len, "看法".as_bytes())
+}
+
+fn request_prefers_live_web_research(buf: &[u8], len: usize) -> bool {
+    request_has_timely_marker(buf, len)
+        && request_has_research_subject_marker(buf, len)
+        && !request_mentions_x_topic(buf, len)
+        && !request_authorizes_bounded_python_execution(buf, len)
+}
+
+fn request_looks_like_reference_followup(buf: &[u8], len: usize) -> bool {
+    contains_ascii_phrase(buf, len, b"same source")
+        || contains_ascii_phrase(buf, len, b"that source")
+        || contains_ascii_phrase(buf, len, b"that result")
+        || contains_ascii_phrase(buf, len, b"previous answer")
+        || contains_ascii_phrase(buf, len, b"source link")
+        || contains_ascii_phrase(buf, len, b"summarize only")
+        || contains_bytes_phrase(buf, len, "刚才".as_bytes())
+        || contains_bytes_phrase(buf, len, "刚刚".as_bytes())
+        || contains_bytes_phrase(buf, len, "上面".as_bytes())
+        || contains_bytes_phrase(buf, len, "上一个".as_bytes())
+        || contains_bytes_phrase(buf, len, "前面".as_bytes())
+        || contains_bytes_phrase(buf, len, "同一来源".as_bytes())
+        || contains_bytes_phrase(buf, len, "来源链接".as_bytes())
+        || contains_bytes_phrase(buf, len, "只总结".as_bytes())
+        || contains_bytes_phrase(buf, len, "用中文总结".as_bytes())
 }
 
 fn latest_tool_result_requires_execution_recovery() -> bool {
@@ -788,6 +892,51 @@ fn goal_looks_like_summary_request() -> bool {
         || contains_ascii_phrase(goal, goal.len(), b"key point")
 }
 
+fn looks_like_json_object_text(src: &[u8]) -> bool {
+    let mut start = 0usize;
+    let mut end = src.len();
+    while start < end && is_space(src[start]) {
+        start += 1;
+    }
+    while end > start && is_space(src[end - 1]) {
+        end -= 1;
+    }
+    end > start + 1 && src[start] == b'{' && src[end - 1] == b'}'
+}
+
+fn try_parse_m4_implicit_tool_from_response(
+    response: &[u8],
+) -> Result<Option<(&'static [u8], bool)>, &'static [u8]> {
+    if json_has_key_local(response, b"type")
+        || json_has_key_local(response, b"tool")
+        || json_has_key_local(response, b"response")
+    {
+        return Ok(None);
+    }
+
+    let current_goal = unsafe { &AGENT_GOAL_TEXT[..AGENT_GOAL_TEXT_LEN] };
+    if json_has_key_local(response, b"query") {
+        let tool: &[u8] = if request_mentions_x_topic(current_goal, current_goal.len()) {
+            b"search_recent_posts"
+        } else {
+            b"search_web"
+        };
+        return match parse_m4_tool_from_response(response, tool, tool.len()) {
+            Ok(v) => Ok(Some(v)),
+            Err(reason) => Err(reason),
+        };
+    }
+
+    if json_has_key_local(response, b"username") {
+        return match parse_m4_tool_from_response(response, b"get_user_posts", 14) {
+            Ok(v) => Ok(Some(v)),
+            Err(reason) => Err(reason),
+        };
+    }
+
+    Ok(None)
+}
+
 fn compact_fetch_preview(out: &mut [u8], src: &[u8], response_truncated: bool) -> usize {
     let mut idx = 0usize;
     idx += copy_bytes(&mut out[idx..], b"Fetched URL content preview:\n");
@@ -848,7 +997,7 @@ fn append_bounded_prompt_bytes(
 }
 
 fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
-    const INSTRUCTIONS: &[u8] = b"You are the MiniAgentOS M4/M5/M6/M7 session agent. Available tools: fetch_url(url), post_url(url,json), post_tweet(text), search_web(query), search_recent_posts(query), get_user_posts(username), read_session_state(key), write_session_state(key,value), list_workspace(path), read_file(path), write_file(path,content), apply_patch(patch), run_process(path), read_process_output(process_id), memory_status(), list_memory(kind), read_memory(id). You must return only compact JSON with no markdown. If you want to call one tool, return exactly one compact JSON object such as {\"type\":\"tool\",\"tool\":\"fetch_url\",\"url\":\"...\"}, {\"type\":\"tool\",\"tool\":\"post_url\",\"url\":\"...\",\"json\":\"{...}\"}, {\"type\":\"tool\",\"tool\":\"post_tweet\",\"text\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_web\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_recent_posts\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"get_user_posts\",\"username\":\"...\"}, {\"type\":\"tool\",\"tool\":\"read_session_state\",\"key\":\"...\"}, {\"type\":\"tool\",\"tool\":\"write_session_state\",\"key\":\"...\",\"value\":\"...\"}, {\"type\":\"tool\",\"tool\":\"list_workspace\",\"path\":\"\"}, {\"type\":\"tool\",\"tool\":\"read_file\",\"path\":\"hello.py\"}, {\"type\":\"tool\",\"tool\":\"write_file\",\"path\":\"hello.py\",\"content\":\"print(\\\"hi\\\")\\n\"}, {\"type\":\"tool\",\"tool\":\"apply_patch\",\"patch\":\"*** Begin Patch\\n*** Update File: hello.py\\n@@\\n-old\\n+new\\n*** End Patch\"}, {\"type\":\"tool\",\"tool\":\"run_process\",\"path\":\"hello.py\"}, {\"type\":\"tool\",\"tool\":\"read_process_output\",\"process_id\":\"1\"}, {\"type\":\"tool\",\"tool\":\"memory_status\"}, {\"type\":\"tool\",\"tool\":\"list_memory\",\"kind\":\"source\"}, or {\"type\":\"tool\",\"tool\":\"read_memory\",\"id\":\"mem-task\"}. If you are done, return {\"type\":\"final\",\"response\":\"...\"}. Use at most one tool call per turn. The Current request section is authoritative and always takes precedence over older conversation. Keep final responses concise and directly answer the user's request. Tool results are compact JSON; inspect them before deciding the next step. Working memory sections are bounded retained summaries, not full raw history; use memory_status, list_memory, or read_memory when you need to inspect what the runtime currently retained. For web research, use search_web for general web search, treat search results as candidate sources, and fetch at least one supporting URL before answering if the request asks for evidence, comparison, or a sourced answer. If search_web already returned non-empty results, your next step should usually be fetch_url on one of those URLs, not another search_web. If you already fetched supporting page content and it answers a single factual request, return a final sourced answer instead of searching again just to confirm the same fact. Only run search_web again when the earlier search was empty, clearly irrelevant, stale for the user's request, or the user explicitly asked you to broaden, refine, compare additional sources, or get something more recent. Use search_recent_posts only for X topic searches, not general web search or account timelines. For workspace and process tools, stay inside the bounded workspace, prefer list_workspace/read_file before editing, use apply_patch for targeted edits, use write_file for full-file replacement, use run_process only for bounded Python file execution inside the workspace, and after every run_process your next step must be read_process_output for that process_id before any final response. If the user asks you to fix code, make a check pass, verify a change, confirm behavior, compute a result by running code, or create a file and then run it, you must observe the real process result first, and if the observed exit_code is non-zero you must continue by inspecting or editing and then rerunning until you have observed success; do not stop after editing alone and do not ask for confirmation to run if the Current request already asked you to run, compute, verify, or send the result. When a coding request explicitly includes both writing or editing code and then executing, checking, computing, or reporting its output, writing the file is not sufficient: continue through run_process and read_process_output before any final response. Escape newlines inside JSON strings as \\n. If a tool result contains {\"ok\":false,...}, adjust and continue instead of pretending it succeeded. After fetch_url returns content for a summary request, answer with a final response instead of fetching the same URL again unless the user explicitly asks to refetch. Prefer using the Latest tool result section before refetching. For follow-up questions about prior posts or fetched data, prefer read_session_state. For questions about what a specific person or account posted recently, prefer get_user_posts(username). If the user asks something outside the available tools, return a brief final refusal.";
+    const INSTRUCTIONS: &[u8] = b"You are the MiniAgentOS M4/M5/M6/M7 session agent. Available tools: fetch_url(url), post_url(url,json), post_tweet(text), search_web(query), search_recent_posts(query), get_user_posts(username), read_session_state(key), write_session_state(key,value), list_workspace(path), read_file(path), write_file(path,content), apply_patch(patch), run_process(path), read_process_output(process_id), memory_status(), list_memory(kind), read_memory(id). You must return only compact JSON with no markdown. If you want to call one tool, return exactly one compact JSON object such as {\"type\":\"tool\",\"tool\":\"fetch_url\",\"url\":\"...\"}, {\"type\":\"tool\",\"tool\":\"post_url\",\"url\":\"...\",\"json\":\"{...}\"}, {\"type\":\"tool\",\"tool\":\"post_tweet\",\"text\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_web\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_recent_posts\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"get_user_posts\",\"username\":\"...\"}, {\"type\":\"tool\",\"tool\":\"read_session_state\",\"key\":\"...\"}, {\"type\":\"tool\",\"tool\":\"write_session_state\",\"key\":\"...\",\"value\":\"...\"}, {\"type\":\"tool\",\"tool\":\"list_workspace\",\"path\":\"\"}, {\"type\":\"tool\",\"tool\":\"read_file\",\"path\":\"hello.py\"}, {\"type\":\"tool\",\"tool\":\"write_file\",\"path\":\"hello.py\",\"content\":\"print(\\\"hi\\\")\\n\"}, {\"type\":\"tool\",\"tool\":\"apply_patch\",\"patch\":\"*** Begin Patch\\n*** Update File: hello.py\\n@@\\n-old\\n+new\\n*** End Patch\"}, {\"type\":\"tool\",\"tool\":\"run_process\",\"path\":\"hello.py\"}, {\"type\":\"tool\",\"tool\":\"read_process_output\",\"process_id\":\"1\"}, {\"type\":\"tool\",\"tool\":\"memory_status\"}, {\"type\":\"tool\",\"tool\":\"list_memory\",\"kind\":\"source\"}, or {\"type\":\"tool\",\"tool\":\"read_memory\",\"id\":\"mem-task\"}. If you are done, return {\"type\":\"final\",\"response\":\"...\"}. Never omit the type and tool fields on a tool call; a bare object like {\"query\":\"...\"} is invalid. Use at most one tool call per turn. The Current request section is authoritative and always takes precedence over older conversation. Keep final responses concise and directly answer the user's request. Tool results are compact JSON; inspect them before deciding the next step. Working memory sections are bounded retained summaries, not full raw history; use memory_status, list_memory, or read_memory when you need to inspect what the runtime currently retained. For web research, use search_web for general web search, treat search results as candidate sources, and fetch at least one supporting URL before answering if the request asks for evidence, comparison, or a sourced answer. For time-sensitive questions about recent developments, current rates, prices, market moves, policy changes, or a person's latest public views, prefer search_web before answering instead of relying on stale memory or prior conversation alone. If search_web already returned non-empty results, your next step should usually be fetch_url on one of those URLs, not another search_web. If you already fetched supporting page content and it answers a single factual request, return a final sourced answer instead of searching again just to confirm the same fact. Only run search_web again when the earlier search was empty, clearly irrelevant, stale for the user's request, or the user explicitly asked you to broaden, refine, compare additional sources, or get something more recent. Use search_recent_posts only for X topic searches, not general web search or account timelines. For workspace and process tools, stay inside the bounded workspace, prefer list_workspace/read_file before editing, use apply_patch for targeted edits, use write_file for full-file replacement, use run_process only for bounded Python file execution inside the workspace, and after every run_process your next step must be read_process_output for that process_id before any final response. If the user asks you to fix code, make a check pass, verify a change, confirm behavior, compute a result by running code, or create a file and then run it, you must observe the real process result first, and if the observed exit_code is non-zero you must continue by inspecting or editing and then rerunning until you have observed success; do not stop after editing alone and do not ask for confirmation to run if the Current request already asked you to run, compute, verify, or send the result. When a coding request explicitly includes both writing or editing code and then executing, checking, computing, or reporting its output, writing the file is not sufficient: continue through run_process and read_process_output before any final response. Escape newlines inside JSON strings as \\n. If a tool result contains {\"ok\":false,...}, adjust and continue instead of pretending it succeeded. After fetch_url returns content for a summary request, answer with a final response instead of fetching the same URL again unless the user explicitly asks to refetch. Prefer using the Latest tool result section before refetching. For follow-up questions about prior posts or fetched data, prefer read_session_state. For questions about what a specific person or account posted recently, prefer get_user_posts(username). If the user asks something outside the available tools, return a brief final refusal.";
     let prompt: &mut [u8] = unsafe { &mut M4_PROMPT_BUF[..] };
     let mut prompt_len = 0usize;
     let current_goal = unsafe { &AGENT_GOAL_TEXT[..AGENT_GOAL_TEXT_LEN] };
@@ -882,6 +1031,19 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
         );
     }
 
+    if request_prefers_live_web_research(current_goal, current_goal.len())
+        && !request_looks_like_reference_followup(current_goal, current_goal.len())
+    {
+        append_prompt_section_header(prompt, &mut prompt_len, b"Timely research requirement");
+        append_bounded_prompt_bytes(
+            prompt,
+            &mut prompt_len,
+            b"The current request is a new time-sensitive research question. Your next step should be search_web for the current subject, even if earlier turns covered a related topic. Do not answer from stale general knowledge, prior conversation, or an older fetched page unless the user explicitly asked about that same source or result. If you return a search tool call, include both {\"type\":\"tool\"} and {\"tool\":\"search_web\"}; do not return a bare JSON object like {\"query\":\"...\"}.",
+            512,
+            b"(none)",
+        );
+    }
+
     append_prompt_section_header(prompt, &mut prompt_len, b"Latest tool result");
     let latest_tool_result_start = prompt_len;
     unsafe {
@@ -894,6 +1056,21 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
         );
     }
     latest_tool_result_chars = prompt_len.saturating_sub(latest_tool_result_start + 2);
+
+    if request_requires_explicit_memory_inspection(current_goal, current_goal.len())
+        && !last_tool_was(b"memory_status")
+        && !last_tool_was(b"list_memory")
+        && !last_tool_was(b"read_memory")
+    {
+        append_prompt_section_header(prompt, &mut prompt_len, b"Memory inspection requirement");
+        append_bounded_prompt_bytes(
+            prompt,
+            &mut prompt_len,
+            b"The current request explicitly asks you to inspect runtime memory. Before any final answer, call the appropriate memory tool instead of inferring memory contents from summaries alone. If the request names a memory id such as mem-source, your next step should usually be read_memory for that id.",
+            384,
+            b"(none)",
+        );
+    }
 
     if latest_tool_result_has_nonempty_search_results() {
         append_prompt_section_header(prompt, &mut prompt_len, b"Research next-step requirement");
@@ -1197,6 +1374,11 @@ fn try_finalize_direct_process_output() -> bool {
     let stderr_len = json_extract_string_local(result, b"stderr", &mut stderr_buf);
     if stdout_len == 0 && stderr_len == 0 {
         return false;
+    }
+
+    if stdout_len != 0 && stderr_len == 0 {
+        finalize_m4_response(&stdout_buf[..stdout_len], false);
+        return true;
     }
 
     let mut response = [0u8; 1400];
@@ -1867,6 +2049,20 @@ fn parse_m4_model_response() -> Result<(&'static [u8], bool), &'static [u8]> {
     if json_extract_string_local(response, b"response", &mut response_buf) != 0 {
         return match parse_m4_final_from_response(response) {
             Ok(v) => Ok(v),
+            Err(reason) => {
+                trace_model_parse_error(reason);
+                Err(reason)
+            }
+        };
+    }
+
+    if looks_like_json_object_text(response) {
+        return match try_parse_m4_implicit_tool_from_response(response) {
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => {
+                trace_model_parse_error(b"unsupported json shape");
+                Err(b"unsupported json shape")
+            }
             Err(reason) => {
                 trace_model_parse_error(reason);
                 Err(reason)

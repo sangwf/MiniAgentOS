@@ -41,6 +41,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPENAI_API_KEY");
     println!("cargo:rerun-if-env-changed=MINIOS_USE_HOST_SOCKS5_PROXY");
     println!("cargo:rerun-if-env-changed=MINIOS_HOST_SOCKS5_PORT");
+    println!("cargo:rerun-if-env-changed=MINIOS_HOST_BRIDGE_PORT");
     println!("cargo:rerun-if-env-changed=MINIOS_ENABLE_NATIVE_OPENAI_TRANSPORT_REUSE");
     println!("cargo:rerun-if-env-changed=MINIOS_DISABLE_AUTO_TLS_LOCAL_FETCH");
     println!("cargo:rerun-if-env-changed=X_BEARER_TOKEN");
@@ -160,6 +161,10 @@ fn main() {
         .ok()
         .and_then(|v| v.trim().parse::<u16>().ok())
         .unwrap_or(7897);
+    let bridge_port = std::env::var("MINIOS_HOST_BRIDGE_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(8090);
     let build_cfg_path = Path::new(&out_dir).join("build_config.rs");
     let mut build_cfg = String::new();
     build_cfg.push_str("pub const HOST_SOCKS5_PROXY_ENABLED: bool = ");
@@ -176,6 +181,9 @@ fn main() {
     build_cfg.push_str(";\n");
     build_cfg.push_str("pub const HOST_SOCKS5_PROXY_PORT: u16 = ");
     build_cfg.push_str(&proxy_port.to_string());
+    build_cfg.push_str(";\n");
+    build_cfg.push_str("pub const HOST_M5_BRIDGE_PORT: u16 = ");
+    build_cfg.push_str(&bridge_port.to_string());
     build_cfg.push_str(";\n");
     std::fs::write(build_cfg_path, build_cfg).expect("write build_config.rs");
 }

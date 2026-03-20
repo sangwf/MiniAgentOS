@@ -40,7 +40,7 @@ const TLS_LOCAL_PATH: &[u8] = b"/";
 const TLS_LOCAL_PORT: u16 = 8443;
 const M5_BRIDGE_DOMAIN: &[u8] = b"10.0.2.2";
 const M5_BRIDGE_IP: [u8; 4] = [10, 0, 2, 2];
-const M5_BRIDGE_PORT: u16 = 8090;
+const M5_BRIDGE_PORT: u16 = HOST_M5_BRIDGE_PORT;
 const M5_BRIDGE_HEALTH_PATH: &[u8] = b"/healthz";
 const M5_BRIDGE_LIST_PREFIX: &[u8] = b"/workspace/list?path=";
 const M5_BRIDGE_LIST_SUFFIX: &[u8] = b"&depth=3";
@@ -61,8 +61,8 @@ static mut UDP_REPLY_BUF: [u8; 1600] = [0u8; 1600];
 static mut UDP_PAYLOAD_BUF: [u8; 128] = [0u8; 128];
 static mut DNS_BUF: [u8; 1536] = [0u8; 1536];
 static mut HTTP_BUF: [u8; 98_304] = [0u8; 98_304];
-static mut FETCH_DOMAIN: [u8; 256] = [0u8; 256];
-static mut FETCH_PATH: [u8; 256] = [0u8; 256];
+static mut FETCH_DOMAIN: [u8; 512] = [0u8; 512];
+static mut FETCH_PATH: [u8; 2048] = [0u8; 2048];
 static mut FETCH_DOMAIN_LEN: usize = 0;
 static mut FETCH_PATH_LEN: usize = 0;
 static mut FETCH_SRC_IP: [u8; 4] = [0u8; 4];
@@ -146,9 +146,9 @@ static mut UART_PRINT_BODY: bool = false;
 static mut UART_PRINT_JSON: bool = false;
 
 const DEBUG_NET: bool = false;
-static mut FETCH_REDIR_DOMAIN: [u8; 256] = [0u8; 256];
+static mut FETCH_REDIR_DOMAIN: [u8; 512] = [0u8; 512];
 static mut FETCH_REDIR_DOMAIN_LEN: usize = 0;
-static mut FETCH_REDIR_PATH: [u8; 256] = [0u8; 256];
+static mut FETCH_REDIR_PATH: [u8; 2048] = [0u8; 2048];
 static mut FETCH_REDIR_PATH_LEN: usize = 0;
 static mut FETCH_REDIR_HTTPS: bool = false;
 const FETCH_MAX_REDIRECTS: u8 = 3;
@@ -2972,6 +2972,31 @@ fn start_tls_local_fetch() -> bool {
     )
 }
 
+fn fetch_restart_transport_state() {
+    unsafe {
+        if FETCH_PROXY {
+            FETCH_DST_IP = PROXY_IP;
+            FETCH_STATE = FETCH_SYN;
+        } else if FETCH_HAVE_FIXED_IP {
+            FETCH_DST_IP = FETCH_FIXED_IP;
+            FETCH_STATE = FETCH_SYN;
+        } else {
+            FETCH_DST_IP = [0, 0, 0, 0];
+            FETCH_STATE = if FETCH_HAVE_GW { FETCH_DNS } else { FETCH_ARP };
+        }
+    }
+}
+
+fn fetch_resume_after_gateway_ready() {
+    unsafe {
+        if FETCH_PROXY || FETCH_HAVE_FIXED_IP || FETCH_DST_IP != [0, 0, 0, 0] {
+            FETCH_STATE = FETCH_SYN;
+        } else {
+            FETCH_STATE = FETCH_DNS;
+        }
+    }
+}
+
 fn start_m5_bridge_openai_post_current_body(body_len: usize) -> bool {
     start_m5_bridge_post_current_body(M5_BRIDGE_OPENAI_RESPONSES_PATH, body_len)
 }
@@ -3021,8 +3046,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                 FETCH_ACK_SENT = false;
                 FETCH_GOT_RESP = false;
                 FETCH_SOCKS_SENT = false;
-                FETCH_DST_IP = if FETCH_PROXY { PROXY_IP } else { [0, 0, 0, 0] };
-                FETCH_STATE = if FETCH_PROXY { FETCH_SYN } else if FETCH_HAVE_GW { FETCH_DNS } else { FETCH_ARP };
+                fetch_restart_transport_state();
                 FETCH_DEADLINE_MS = now + 30_000;
                 return;
             }
@@ -3071,7 +3095,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
             }
         }
         if unsafe { FETCH_HAVE_GW } {
-            unsafe { FETCH_STATE = if FETCH_PROXY { FETCH_SYN } else { FETCH_DNS }; }
+            fetch_resume_after_gateway_ready();
             return;
         }
         if now < unsafe { FETCH_NEXT_MS } {
@@ -3089,8 +3113,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                     FETCH_ACK_SENT = false;
                     FETCH_GOT_RESP = false;
                     FETCH_SOCKS_SENT = false;
-                    FETCH_DST_IP = if FETCH_PROXY { PROXY_IP } else { [0, 0, 0, 0] };
-                    FETCH_STATE = if FETCH_PROXY { FETCH_SYN } else if FETCH_HAVE_GW { FETCH_DNS } else { FETCH_ARP };
+                    fetch_restart_transport_state();
                     return;
                 }
                 set_fetch_error_reason_if_empty(b"gateway arp timed out");
@@ -3131,8 +3154,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                     FETCH_ACK_SENT = false;
                     FETCH_GOT_RESP = false;
                     FETCH_SOCKS_SENT = false;
-                    FETCH_DST_IP = if FETCH_PROXY { PROXY_IP } else { [0, 0, 0, 0] };
-                    FETCH_STATE = if FETCH_PROXY { FETCH_SYN } else if FETCH_HAVE_GW { FETCH_DNS } else { FETCH_ARP };
+                    fetch_restart_transport_state();
                     return;
                 }
                 set_fetch_error_reason_if_empty(b"dns lookup timed out");
@@ -3202,8 +3224,7 @@ fn fetch_tick(nb: usize, mac: [u8; 6]) {
                     FETCH_ACK_SENT = false;
                     FETCH_GOT_RESP = false;
                     FETCH_SOCKS_SENT = false;
-                    FETCH_DST_IP = if FETCH_PROXY { PROXY_IP } else { [0, 0, 0, 0] };
-                    FETCH_STATE = if FETCH_PROXY { FETCH_SYN } else if FETCH_HAVE_GW { FETCH_DNS } else { FETCH_ARP };
+                    fetch_restart_transport_state();
                     return;
                 }
                 set_fetch_error_reason_if_empty(b"tcp connect timed out");
@@ -4620,7 +4641,7 @@ pub extern "C" fn kmain(dtb_addr: usize) -> ! {
                                 FETCH_GW_MAC = m;
                                 FETCH_HAVE_GW = true;
                                 if FETCH_STATE == FETCH_ARP {
-                                    FETCH_STATE = if FETCH_PROXY { FETCH_SYN } else if FETCH_DST_IP != [0, 0, 0, 0] { FETCH_SYN } else { FETCH_DNS };
+                                    fetch_resume_after_gateway_ready();
                                     FETCH_RETRY = 0;
                                     FETCH_NEXT_MS = 0;
                                 }

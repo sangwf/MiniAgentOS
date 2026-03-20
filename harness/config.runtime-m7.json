@@ -17,6 +17,7 @@
   "env": {
     "MINIOS_USE_HOST_SOCKS5_PROXY": "1",
     "MINIOS_HOST_SOCKS5_PORT": "10808",
+    "MINIOS_HOST_BRIDGE_PORT": "18092",
     "MINIOS_USE_OPENAI_HOST_BRIDGE": "0",
     "MINIOS_ENABLE_NATIVE_OPENAI_TRANSPORT_REUSE": "0",
     "MINIOS_DISABLE_AUTO_TLS_LOCAL_FETCH": "1"
@@ -24,7 +25,7 @@
   "docker_image": "python:3.12-slim",
   "m5_bridge": {
     "bind_host": "127.0.0.1",
-    "port": 8090
+    "port": 18092
   },
   "result_sink": {
     "bind_host": "127.0.0.1",

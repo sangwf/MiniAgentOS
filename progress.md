@@ -218,6 +218,50 @@
   - a local chunk-boundary simulation for long partial `TRACE {...}` rows
   - `./bin/check`
 - Put the launcher stdin into cbreak mode during a live manual session so the
+
+## 2026-03-20 Manual Research DNS/Bridge Fix
+
+- Reproduced the manual failure on:
+  - `Goal > 美元最近的利率变化`
+  which previously emitted repeated `dns parse fail`.
+- Inspected the latest manual artifacts under:
+  - `output/agent-manual/20260320-214048/`
+  and confirmed:
+  - OpenAI model turns were succeeding
+  - `search_web` was being selected correctly
+  - the failure happened on the guest fetch path, not in the model layer
+- Traced the runtime state machine and confirmed fixed-IP requests were being
+  reset into `FETCH_DNS` on several retry branches in `runtime/src/main.rs`.
+- Added helper-based restart logic in `runtime/src/main.rs` so fixed-IP bridge
+  requests preserve `FETCH_SYN` semantics across:
+  - request timeout restarts
+  - ARP completion
+  - ARP retry exhaustion
+  - DNS retry exhaustion
+  - SYN retry exhaustion
+- Rebuilt with:
+  - `cd runtime && make build`
+- Re-ran the manual path and verified the original `dns parse fail` disappeared.
+- Investigated the remaining manual `search_web` timeout and found a second,
+  separate bug in the manual launcher:
+  - the host bridge listened on `8090`
+  - but the guest binary was still built with `MINIOS_HOST_BRIDGE_PORT=18090`
+    inherited from `harness/config.runtime-m5.json`
+- Updated `tools/m5_run.py` to export
+  `MINIOS_HOST_BRIDGE_PORT=str(args.bridge_port)` for manual runs.
+- Hardened `tools/m5_run.py` cleanup so stale `current.json` state no longer
+  aborts startup on `PermissionError` from `killpg`.
+- Re-ran the manual repro after the launcher fix and observed a full success:
+  - `search_web` completed
+  - `fetch_url` completed
+  - the runtime answered with the recent U.S. federal funds rate data and the
+    Trading Economics source URL
+- Revalidated shared surfaces with:
+  - `./bin/check`
+  - `./bin/run-suite --suite m6live --config harness/config.runtime-m6.json`
+  - `./bin/run-suite --suite m5live --config harness/config.runtime-m5.json`
+  - `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json`
+- All of those passed.
   host terminal stops locally echoing typed input; only the guest-side colored
   `Goal >` echo remains visible now.
 - Revalidated with:
@@ -468,4 +512,94 @@
   - `m7live` passed with:
     - `m7live-memory-inspection`
     - `m7live-truthful-compaction`
+  - `check` passed
+
+## 2026-03-20 Timely Research / Live Harness Hardening
+
+- Reproduced the bad multi-turn timely-research behavior with a temporary live
+  debug case and confirmed two concrete problems:
+  - stale context reuse across new time-sensitive subjects
+  - long fetched search-result URLs failing as `url path too long`
+- Hardened `/Users/sangwf/code/MiniAgentOS/runtime/src/agent/loop.rs`:
+  - added implicit-tool coercion for bare `{query:...}` and `{username:...}`
+    JSON model outputs
+  - rejected malformed bare JSON instead of leaking it to UART
+  - added a `Timely research requirement` prompt section so new current-subject
+    research turns re-run `search_web`
+  - narrowed direct process-output finalization to explicit stdout/output asks
+    and return raw stdout for pure stdout runs
+  - added a `Memory inspection requirement` prompt section so explicit
+    `mem-*` inspection requests use `read_memory` / `list_memory` /
+    `memory_status` before answering
+- Hardened `/Users/sangwf/code/MiniAgentOS/runtime/src/main.rs`:
+  - increased fetch and redirect domain/path buffers so live fetched
+    search-result URLs no longer fail as `url path too long`
+  - switched the runtime host-bridge port constant to the build-generated
+    `HOST_M5_BRIDGE_PORT`
+- Hardened `/Users/sangwf/code/MiniAgentOS/runtime/build.rs`:
+  - added `MINIOS_HOST_BRIDGE_PORT`
+  - emitted `HOST_M5_BRIDGE_PORT` into `build_config.rs`
+- Hardened `/Users/sangwf/code/MiniAgentOS/harness/lib/run_case.py`:
+  - fail fast when the spawned bridge process exits early on a claimed port
+  - preserve multi-line terminal summaries instead of truncating at the first
+    blank line
+- Updated live configs to isolate bridge ports from manual runs:
+  - `/Users/sangwf/code/MiniAgentOS/harness/config.runtime-m5.json` -> `18090`
+  - `/Users/sangwf/code/MiniAgentOS/harness/config.runtime-m6.json` -> `18091`
+  - `/Users/sangwf/code/MiniAgentOS/harness/config.runtime-m7.json` -> `18092`
+- Removed the temporary debug-only case:
+  - `/Users/sangwf/code/MiniAgentOS/harness/cases/debug-m6-timely-research/`
+- Re-ran validation:
+  - `cd /Users/sangwf/code/MiniAgentOS/runtime && make build`
+  - `./bin/run-suite --suite m5live --config harness/config.runtime-m5.json`
+  - `./bin/run-suite --suite m6live --config harness/config.runtime-m6.json`
+  - `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json`
+  - `./bin/run-suite --suite m5 --config harness/config.fixture.json`
+  - `./bin/run-suite --suite m6 --config harness/config.fixture.json`
+  - `./bin/run-suite --suite m7 --config harness/config.fixture.json`
+  - `./bin/run-suite --suite m4 --config harness/config.fixture.json`
+  - `./bin/check`
+- Validation status after the hardening pass:
+  - `m5live` passed
+  - `m6live` passed
+  - `m7live` passed
+  - `m5` passed
+  - `m6` passed
+  - `m7` passed
+  - `m4` still shows only the two long-standing known failures
+  - `check` passed
+
+## 2026-03-20 M7-Aware Viewer Enhancements
+
+- Extended `/Users/sangwf/code/MiniAgentOS/tools/view_llm_log.py` so it can
+  auto-read the sibling `trace.jsonl` next to a selected `llm_api_log.jsonl`.
+- Added trace-aware render helpers for:
+  - `CONTEXT SECTIONS`
+  - `TRACE CONTEXT BUDGET`
+  - `MEMORY EVENTS`
+  - `COMPACTION`
+- Added new viewer options:
+  - `--focus context`
+  - `--focus memory`
+  - `--show-context-sections`
+  - `--show-memory-events`
+  - `--show-compaction`
+- Restricted `request.input` section parsing to the real top-level M4/M5/M6/M7
+  prompt section names so fetched-page previews and tool echoes are no longer
+  mis-rendered as synthetic prompt layers.
+- Added ergonomic defaults so:
+  - `--focus context` automatically enables context-section rendering
+  - `--focus memory` automatically enables context sections, memory events, and
+    compaction rendering
+- Spot-checked the latest manual log at:
+  - `/Users/sangwf/code/MiniAgentOS/output/agent-manual/20260320-215845/llm_api_log.jsonl`
+  using:
+  - `./tools/view_llm_log.py --focus context --budget`
+  - `./tools/view_llm_log.py --focus memory`
+- Revalidated with:
+  - `python3 -m py_compile /Users/sangwf/code/MiniAgentOS/tools/view_llm_log.py`
+  - `./bin/check`
+- Validation status after the viewer pass:
+  - the viewer compiles
+  - context and memory focus modes render correctly against real M7 manual logs
   - `check` passed
