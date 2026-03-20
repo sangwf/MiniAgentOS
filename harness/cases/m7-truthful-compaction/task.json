@@ -1,0 +1,73 @@
+{
+  "goal_id": "m7-truthful-compaction",
+  "goal": "Compact a long retained source and prove the runtime still exposes truthful retained state.",
+  "input_mode": "text_line",
+  "input_payload": "Compact the large source memory truthfully.",
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 30,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_completed"
+    ],
+    "session_transcript_required": true,
+    "expected_turn_count": 1,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "Project Atlas",
+      "compacted"
+    ],
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "compact_memory"
+      },
+      {
+        "event": "tool_call_requested",
+        "tool": "read_memory"
+      }
+    ],
+    "max_tool_calls": 2,
+    "memory_snapshot_required": true,
+    "memory_entry_count": 2,
+    "expected_memory_entries": [
+      {
+        "id": "mem-source-compact",
+        "kind": "source",
+        "state": "compacted"
+      }
+    ],
+    "memory_events_required": true,
+    "expected_memory_events": [
+      {
+        "event": "memory_compacted",
+        "entry_id": "mem-source-compact",
+        "from_state": "raw",
+        "to_state": "compacted"
+      }
+    ],
+    "context_snapshot_required": true,
+    "context_turn_count": 1,
+    "required_context_sections": [
+      "Current request",
+      "Known sources"
+    ],
+    "context_budget_required": true,
+    "context_budget_turn_count": 1
+  }
+}

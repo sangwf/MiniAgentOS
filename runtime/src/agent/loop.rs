@@ -10,8 +10,11 @@ const M4_TOOL_RESULT_LIMIT: usize = 8_192;
 const M4_PROMPT_BUF_LIMIT: usize = 16_384;
 const M4_CURRENT_REQUEST_LIMIT: usize = 1_024;
 const M4_LATEST_TOOL_RESULT_LIMIT: usize = 1_024;
-const M4_STATE_SNAPSHOT_LIMIT: usize = 1_536;
-const M4_RECENT_CONVERSATION_LIMIT: usize = 3_072;
+const M4_WORKING_MEMORY_LIMIT: usize = 640;
+const M4_KNOWN_SOURCES_LIMIT: usize = 640;
+const M4_WORKSPACE_MEMORY_LIMIT: usize = 640;
+const M4_STATE_SNAPSHOT_LIMIT: usize = 1_280;
+const M4_RECENT_CONVERSATION_LIMIT: usize = 2_560;
 const M4_FETCH_PREVIEW_LIMIT: usize = 900;
 
 static mut M4_TOOL_NAME: [u8; 32] = [0u8; 32];
@@ -222,6 +225,9 @@ fn is_supported_m4_tool_name(tool: &[u8], tool_len: usize) -> bool {
         || starts_with(tool, tool_len, b"apply_patch")
         || starts_with(tool, tool_len, b"run_process")
         || starts_with(tool, tool_len, b"read_process_output")
+        || starts_with(tool, tool_len, b"memory_status")
+        || starts_with(tool, tool_len, b"list_memory")
+        || starts_with(tool, tool_len, b"read_memory")
 }
 
 fn utf8_safe_suffix_start(buf: &[u8], keep: usize) -> usize {
@@ -537,12 +543,12 @@ fn build_tool_inventory_response(goal: &[u8], out: &mut [u8]) -> usize {
     if contains_non_ascii(goal) {
         copy_bytes(
             out,
-            "我当前可调用的工具有：fetch_url、post_url、post_tweet、search_web、search_recent_posts、get_user_posts、read_session_state、write_session_state、list_workspace、read_file、write_file、apply_patch、run_process、read_process_output。".as_bytes(),
+            "我当前可调用的工具有：fetch_url、post_url、post_tweet、search_web、search_recent_posts、get_user_posts、read_session_state、write_session_state、list_workspace、read_file、write_file、apply_patch、run_process、read_process_output、memory_status、list_memory、read_memory。".as_bytes(),
         )
     } else {
         copy_bytes(
             out,
-            b"My callable tools are: fetch_url, post_url, post_tweet, search_web, search_recent_posts, get_user_posts, read_session_state, write_session_state, list_workspace, read_file, write_file, apply_patch, run_process, and read_process_output.",
+            b"My callable tools are: fetch_url, post_url, post_tweet, search_web, search_recent_posts, get_user_posts, read_session_state, write_session_state, list_workspace, read_file, write_file, apply_patch, run_process, read_process_output, memory_status, list_memory, and read_memory.",
         )
     }
 }
@@ -561,6 +567,12 @@ fn try_handle_local_meta_request(goal: &[u8]) -> bool {
 }
 
 pub(crate) fn handle_session_command(line: &[u8], len: usize) -> bool {
+    let mut start = 0usize;
+    while start < len && is_space(line[start]) {
+        start += 1;
+    }
+    let trimmed = &line[start..len];
+    let trimmed_len = trimmed.len();
     if starts_with_ignore_leading_space(line, len, b"session new")
         || starts_with_ignore_leading_space(line, len, b"session reset")
         || starts_with_ignore_leading_space(line, len, b"session clear")
@@ -572,6 +584,45 @@ pub(crate) fn handle_session_command(line: &[u8], len: usize) -> bool {
     }
     if starts_with_ignore_leading_space(line, len, b"session status") {
         session::session_status();
+        return true;
+    }
+    if starts_with(trimmed, trimmed_len, b"memory-status")
+        || starts_with(trimmed, trimmed_len, b"memory status")
+    {
+        memory::memory_status_command();
+        return true;
+    }
+    if starts_with(trimmed, trimmed_len, b"memory-list")
+        || starts_with(trimmed, trimmed_len, b"memory list")
+    {
+        let mut arg_start = if starts_with(trimmed, trimmed_len, b"memory-list") {
+            b"memory-list".len()
+        } else {
+            b"memory list".len()
+        };
+        while arg_start < trimmed_len && is_space(trimmed[arg_start]) {
+            arg_start += 1;
+        }
+        memory::memory_list_command(&trimmed[arg_start..trimmed_len]);
+        return true;
+    }
+    if starts_with(trimmed, trimmed_len, b"memory-read")
+        || starts_with(trimmed, trimmed_len, b"memory read")
+    {
+        let mut arg_start = if starts_with(trimmed, trimmed_len, b"memory-read") {
+            b"memory-read".len()
+        } else {
+            b"memory read".len()
+        };
+        while arg_start < trimmed_len && is_space(trimmed[arg_start]) {
+            arg_start += 1;
+        }
+        if arg_start >= trimmed_len {
+            clear_inline_status();
+            uart::write_str("usage: memory-read <id>\n");
+            return true;
+        }
+        memory::memory_read_command(&trimmed[arg_start..trimmed_len]);
         return true;
     }
     false
@@ -628,6 +679,15 @@ fn trace_tool_call_with_two_args(
     uart::write_str("\":\"");
     trace_json_escaped(arg2_value);
     uart::write_str("\"}}\n");
+}
+
+fn trace_tool_call_without_args(event: &[u8], tool: &[u8]) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(event, unsafe { M4_LOOP_STEP });
+    trace_json_string_field(b"tool", tool);
+    uart::write_str(",\"arguments\":{}}\n");
 }
 
 fn trace_tool_call_completed(tool: &[u8], status: &[u8]) {
@@ -692,6 +752,17 @@ fn trace_model_turn_completed(stop_reason: &[u8]) {
     }
     trace_begin(b"model_turn_completed", unsafe { M4_LOOP_STEP });
     trace_json_string_field(b"stop_reason", stop_reason);
+    uart::write_str("}\n");
+}
+
+fn trace_context_section_snapshot(name: &[u8], chars: usize) {
+    if !trace_output_enabled() {
+        return;
+    }
+    trace_begin(b"context_section_snapshot", unsafe { M4_LOOP_STEP });
+    trace_json_u64_field(b"interaction_id", trace_current_model_interaction_id() as u64);
+    trace_json_string_field(b"name", name);
+    trace_json_u64_field(b"chars", chars as u64);
     uart::write_str("}\n");
 }
 
@@ -777,12 +848,20 @@ fn append_bounded_prompt_bytes(
 }
 
 fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
-    const INSTRUCTIONS: &[u8] = b"You are the MiniAgentOS M4/M5/M6 session agent. Available tools: fetch_url(url), post_url(url,json), post_tweet(text), search_web(query), search_recent_posts(query), get_user_posts(username), read_session_state(key), write_session_state(key,value), list_workspace(path), read_file(path), write_file(path,content), apply_patch(patch), run_process(path), read_process_output(process_id). You must return only compact JSON with no markdown. If you want to call one tool, return exactly one compact JSON object such as {\"type\":\"tool\",\"tool\":\"fetch_url\",\"url\":\"...\"}, {\"type\":\"tool\",\"tool\":\"post_url\",\"url\":\"...\",\"json\":\"{...}\"}, {\"type\":\"tool\",\"tool\":\"post_tweet\",\"text\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_web\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_recent_posts\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"get_user_posts\",\"username\":\"...\"}, {\"type\":\"tool\",\"tool\":\"read_session_state\",\"key\":\"...\"}, {\"type\":\"tool\",\"tool\":\"write_session_state\",\"key\":\"...\",\"value\":\"...\"}, {\"type\":\"tool\",\"tool\":\"list_workspace\",\"path\":\"\"}, {\"type\":\"tool\",\"tool\":\"read_file\",\"path\":\"hello.py\"}, {\"type\":\"tool\",\"tool\":\"write_file\",\"path\":\"hello.py\",\"content\":\"print(\\\"hi\\\")\\n\"}, {\"type\":\"tool\",\"tool\":\"apply_patch\",\"patch\":\"*** Begin Patch\\n*** Update File: hello.py\\n@@\\n-old\\n+new\\n*** End Patch\"}, {\"type\":\"tool\",\"tool\":\"run_process\",\"path\":\"hello.py\"}, or {\"type\":\"tool\",\"tool\":\"read_process_output\",\"process_id\":\"1\"}. If you are done, return {\"type\":\"final\",\"response\":\"...\"}. Use at most one tool call per turn. The Current request section is authoritative and always takes precedence over older conversation. Keep final responses concise and directly answer the user's request. Tool results are compact JSON; inspect them before deciding the next step. For web research, use search_web for general web search, treat search results as candidate sources, and fetch at least one supporting URL before answering if the request asks for evidence, comparison, or a sourced answer. If search_web already returned non-empty results, your next step should usually be fetch_url on one of those URLs, not another search_web. If you already fetched supporting page content and it answers a single factual request, return a final sourced answer instead of searching again just to confirm the same fact. Only run search_web again when the earlier search was empty, clearly irrelevant, stale for the user's request, or the user explicitly asked you to broaden, refine, compare additional sources, or get something more recent. Use search_recent_posts only for X topic searches, not general web search or account timelines. For workspace and process tools, stay inside the bounded workspace, prefer list_workspace/read_file before editing, use apply_patch for targeted edits, use write_file for full-file replacement, use run_process only for bounded Python file execution inside the workspace, and after every run_process your next step must be read_process_output for that process_id before any final response. If the user asks you to fix code, make a check pass, verify a change, confirm behavior, compute a result by running code, or create a file and then run it, you must observe the real process result first, and if the observed exit_code is non-zero you must continue by inspecting or editing and then rerunning until you have observed success; do not stop after editing alone and do not ask for confirmation to run if the Current request already asked you to run, compute, verify, or send the result. When a coding request explicitly includes both writing or editing code and then executing, checking, computing, or reporting its output, writing the file is not sufficient: continue through run_process and read_process_output before any final response. Escape newlines inside JSON strings as \\n. If a tool result contains {\"ok\":false,...}, adjust and continue instead of pretending it succeeded. After fetch_url returns content for a summary request, answer with a final response instead of fetching the same URL again unless the user explicitly asks to refetch. Prefer using the Latest tool result section before refetching. For follow-up questions about prior posts or fetched data, prefer read_session_state. For questions about what a specific person or account posted recently, prefer get_user_posts(username). If the user asks something outside the available tools, return a brief final refusal.";
+    const INSTRUCTIONS: &[u8] = b"You are the MiniAgentOS M4/M5/M6/M7 session agent. Available tools: fetch_url(url), post_url(url,json), post_tweet(text), search_web(query), search_recent_posts(query), get_user_posts(username), read_session_state(key), write_session_state(key,value), list_workspace(path), read_file(path), write_file(path,content), apply_patch(patch), run_process(path), read_process_output(process_id), memory_status(), list_memory(kind), read_memory(id). You must return only compact JSON with no markdown. If you want to call one tool, return exactly one compact JSON object such as {\"type\":\"tool\",\"tool\":\"fetch_url\",\"url\":\"...\"}, {\"type\":\"tool\",\"tool\":\"post_url\",\"url\":\"...\",\"json\":\"{...}\"}, {\"type\":\"tool\",\"tool\":\"post_tweet\",\"text\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_web\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"search_recent_posts\",\"query\":\"...\"}, {\"type\":\"tool\",\"tool\":\"get_user_posts\",\"username\":\"...\"}, {\"type\":\"tool\",\"tool\":\"read_session_state\",\"key\":\"...\"}, {\"type\":\"tool\",\"tool\":\"write_session_state\",\"key\":\"...\",\"value\":\"...\"}, {\"type\":\"tool\",\"tool\":\"list_workspace\",\"path\":\"\"}, {\"type\":\"tool\",\"tool\":\"read_file\",\"path\":\"hello.py\"}, {\"type\":\"tool\",\"tool\":\"write_file\",\"path\":\"hello.py\",\"content\":\"print(\\\"hi\\\")\\n\"}, {\"type\":\"tool\",\"tool\":\"apply_patch\",\"patch\":\"*** Begin Patch\\n*** Update File: hello.py\\n@@\\n-old\\n+new\\n*** End Patch\"}, {\"type\":\"tool\",\"tool\":\"run_process\",\"path\":\"hello.py\"}, {\"type\":\"tool\",\"tool\":\"read_process_output\",\"process_id\":\"1\"}, {\"type\":\"tool\",\"tool\":\"memory_status\"}, {\"type\":\"tool\",\"tool\":\"list_memory\",\"kind\":\"source\"}, or {\"type\":\"tool\",\"tool\":\"read_memory\",\"id\":\"mem-task\"}. If you are done, return {\"type\":\"final\",\"response\":\"...\"}. Use at most one tool call per turn. The Current request section is authoritative and always takes precedence over older conversation. Keep final responses concise and directly answer the user's request. Tool results are compact JSON; inspect them before deciding the next step. Working memory sections are bounded retained summaries, not full raw history; use memory_status, list_memory, or read_memory when you need to inspect what the runtime currently retained. For web research, use search_web for general web search, treat search results as candidate sources, and fetch at least one supporting URL before answering if the request asks for evidence, comparison, or a sourced answer. If search_web already returned non-empty results, your next step should usually be fetch_url on one of those URLs, not another search_web. If you already fetched supporting page content and it answers a single factual request, return a final sourced answer instead of searching again just to confirm the same fact. Only run search_web again when the earlier search was empty, clearly irrelevant, stale for the user's request, or the user explicitly asked you to broaden, refine, compare additional sources, or get something more recent. Use search_recent_posts only for X topic searches, not general web search or account timelines. For workspace and process tools, stay inside the bounded workspace, prefer list_workspace/read_file before editing, use apply_patch for targeted edits, use write_file for full-file replacement, use run_process only for bounded Python file execution inside the workspace, and after every run_process your next step must be read_process_output for that process_id before any final response. If the user asks you to fix code, make a check pass, verify a change, confirm behavior, compute a result by running code, or create a file and then run it, you must observe the real process result first, and if the observed exit_code is non-zero you must continue by inspecting or editing and then rerunning until you have observed success; do not stop after editing alone and do not ask for confirmation to run if the Current request already asked you to run, compute, verify, or send the result. When a coding request explicitly includes both writing or editing code and then executing, checking, computing, or reporting its output, writing the file is not sufficient: continue through run_process and read_process_output before any final response. Escape newlines inside JSON strings as \\n. If a tool result contains {\"ok\":false,...}, adjust and continue instead of pretending it succeeded. After fetch_url returns content for a summary request, answer with a final response instead of fetching the same URL again unless the user explicitly asks to refetch. Prefer using the Latest tool result section before refetching. For follow-up questions about prior posts or fetched data, prefer read_session_state. For questions about what a specific person or account posted recently, prefer get_user_posts(username). If the user asks something outside the available tools, return a brief final refusal.";
     let prompt: &mut [u8] = unsafe { &mut M4_PROMPT_BUF[..] };
     let mut prompt_len = 0usize;
     let current_goal = unsafe { &AGENT_GOAL_TEXT[..AGENT_GOAL_TEXT_LEN] };
+    let mut current_request_chars = 0usize;
+    let mut latest_tool_result_chars = 0usize;
+    let mut working_memory_chars = 0usize;
+    let mut known_sources_chars = 0usize;
+    let mut workspace_memory_chars = 0usize;
+    let mut state_chars = 0usize;
+    let mut history_chars = 0usize;
 
     append_prompt_section_header(prompt, &mut prompt_len, b"Current request");
+    let current_request_start = prompt_len;
     append_bounded_prompt_bytes(
         prompt,
         &mut prompt_len,
@@ -790,6 +869,7 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
         M4_CURRENT_REQUEST_LIMIT,
         b"(empty)",
     );
+    current_request_chars = prompt_len.saturating_sub(current_request_start + 2);
 
     if request_authorizes_bounded_python_execution(current_goal, current_goal.len()) {
         append_prompt_section_header(prompt, &mut prompt_len, b"Execution requirement");
@@ -803,6 +883,7 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
     }
 
     append_prompt_section_header(prompt, &mut prompt_len, b"Latest tool result");
+    let latest_tool_result_start = prompt_len;
     unsafe {
         append_bounded_prompt_bytes(
             prompt,
@@ -812,6 +893,7 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
             b"(none)",
         );
     }
+    latest_tool_result_chars = prompt_len.saturating_sub(latest_tool_result_start + 2);
 
     if latest_tool_result_has_nonempty_search_results() {
         append_prompt_section_header(prompt, &mut prompt_len, b"Research next-step requirement");
@@ -846,6 +928,57 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
         );
     }
 
+    append_prompt_section_header(prompt, &mut prompt_len, b"Working memory");
+    let working_memory_start = prompt_len;
+    let working_memory_end = (prompt_len + M4_WORKING_MEMORY_LIMIT).min(prompt.len());
+    memory::append_working_memory_to(
+        &mut prompt[prompt_len..working_memory_end],
+        &mut working_memory_chars,
+        M4_WORKING_MEMORY_LIMIT,
+    );
+    if working_memory_chars == 0 {
+        prompt_len += copy_bytes(&mut prompt[prompt_len..], b"(empty)\n\n");
+        working_memory_chars = b"(empty)".len();
+    } else {
+        prompt_len += working_memory_chars;
+        prompt_len += copy_bytes(&mut prompt[prompt_len..], b"\n\n");
+    }
+    let _ = working_memory_start;
+
+    append_prompt_section_header(prompt, &mut prompt_len, b"Known sources");
+    let known_sources_start = prompt_len;
+    let known_sources_end = (prompt_len + M4_KNOWN_SOURCES_LIMIT).min(prompt.len());
+    memory::append_known_sources_to(
+        &mut prompt[prompt_len..known_sources_end],
+        &mut known_sources_chars,
+        M4_KNOWN_SOURCES_LIMIT,
+    );
+    if known_sources_chars == 0 {
+        prompt_len += copy_bytes(&mut prompt[prompt_len..], b"(empty)\n\n");
+        known_sources_chars = b"(empty)".len();
+    } else {
+        prompt_len += known_sources_chars;
+        prompt_len += copy_bytes(&mut prompt[prompt_len..], b"\n\n");
+    }
+    let _ = known_sources_start;
+
+    append_prompt_section_header(prompt, &mut prompt_len, b"Workspace memory");
+    let workspace_memory_start = prompt_len;
+    let workspace_memory_end = (prompt_len + M4_WORKSPACE_MEMORY_LIMIT).min(prompt.len());
+    memory::append_workspace_memory_to(
+        &mut prompt[prompt_len..workspace_memory_end],
+        &mut workspace_memory_chars,
+        M4_WORKSPACE_MEMORY_LIMIT,
+    );
+    if workspace_memory_chars == 0 {
+        prompt_len += copy_bytes(&mut prompt[prompt_len..], b"(empty)\n\n");
+        workspace_memory_chars = b"(empty)".len();
+    } else {
+        prompt_len += workspace_memory_chars;
+        prompt_len += copy_bytes(&mut prompt[prompt_len..], b"\n\n");
+    }
+    let _ = workspace_memory_start;
+
     append_prompt_section_header(prompt, &mut prompt_len, b"Session state");
     let mut state_len = 0usize;
     let state_end = (prompt_len + M4_STATE_SNAPSHOT_LIMIT).min(prompt.len());
@@ -855,9 +988,11 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
     );
     if state_len == 0 {
         prompt_len += copy_bytes(&mut prompt[prompt_len..], b"(empty)\n\n");
+        state_chars = b"(empty)".len();
     } else {
         prompt_len += state_len;
         prompt_len += copy_bytes(&mut prompt[prompt_len..], b"\n\n");
+        state_chars = state_len;
     }
 
     append_prompt_section_header(prompt, &mut prompt_len, b"Recent conversation");
@@ -871,8 +1006,10 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
     );
     if history_len == 0 {
         prompt_len += copy_bytes(&mut prompt[prompt_len..], b"(empty)\n");
+        history_chars = b"(empty)".len();
     } else {
         prompt_len += history_len;
+        history_chars = history_len;
         if prompt_len == 0 || prompt[prompt_len - 1] != b'\n' {
             prompt_len += copy_bytes(&mut prompt[prompt_len..], b"\n");
         }
@@ -880,6 +1017,16 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
     if prompt_len > M4_MODEL_INPUT_LIMIT {
         prompt_len = utf8_safe_prefix_len(&prompt[..prompt_len], M4_MODEL_INPUT_LIMIT);
     }
+    memory::record_context_budget(
+        INSTRUCTIONS.len(),
+        current_request_chars,
+        latest_tool_result_chars,
+        working_memory_chars,
+        known_sources_chars,
+        workspace_memory_chars,
+        state_chars,
+        history_chars,
+    );
     trace_model_request_snapshot(
         b"session_model",
         crate::openai::model_name(),
@@ -888,6 +1035,13 @@ fn build_m4_openai_request_body(out: &mut [u8]) -> usize {
         b"low",
         1400,
     );
+    trace_context_section_snapshot(b"Current request", current_request_chars);
+    trace_context_section_snapshot(b"Latest tool result", latest_tool_result_chars);
+    trace_context_section_snapshot(b"Working memory", working_memory_chars);
+    trace_context_section_snapshot(b"Known sources", known_sources_chars);
+    trace_context_section_snapshot(b"Workspace memory", workspace_memory_chars);
+    trace_context_section_snapshot(b"Session state", state_chars);
+    trace_context_section_snapshot(b"Recent conversation", history_chars);
     let mut idx = 0usize;
     idx = copy_bytes(&mut out[idx..], b"{\"model\":\"") + idx;
     idx = json_escape_append(out, idx, crate::openai::model_name());
@@ -1073,6 +1227,45 @@ fn try_finalize_direct_process_output() -> bool {
 fn execute_sync_tool(tool: &[u8]) -> bool {
     let arg1 = unsafe { &M4_TOOL_ARG1[..M4_TOOL_ARG1_LEN] };
     let arg2 = unsafe { &M4_TOOL_ARG2[..M4_TOOL_ARG2_LEN] };
+    if starts_with(tool, tool.len(), b"memory_status") {
+        trace_tool_call_without_args(b"tool_call_requested", tool);
+        trace_tool_call_without_args(b"tool_call_started", tool);
+        unsafe {
+            M4_LAST_TOOL_RESULT_LEN = memory::build_memory_status_json(&mut M4_LAST_TOOL_RESULT);
+        }
+        session::append_tool_result(tool, unsafe {
+            &M4_LAST_TOOL_RESULT[..M4_LAST_TOOL_RESULT_LEN]
+        });
+        trace_tool_call_completed(tool, b"ok");
+        unsafe { M4_LOOP_STEP = M4_LOOP_STEP.wrapping_add(1); }
+        return start_m4_model_turn();
+    }
+    if starts_with(tool, tool.len(), b"list_memory") {
+        trace_tool_call_with_arg(b"tool_call_requested", tool, b"kind", arg1);
+        trace_tool_call_with_arg(b"tool_call_started", tool, b"kind", arg1);
+        unsafe {
+            M4_LAST_TOOL_RESULT_LEN = memory::build_list_memory_json(arg1, &mut M4_LAST_TOOL_RESULT);
+        }
+        session::append_tool_result(tool, unsafe {
+            &M4_LAST_TOOL_RESULT[..M4_LAST_TOOL_RESULT_LEN]
+        });
+        trace_tool_call_completed(tool, b"ok");
+        unsafe { M4_LOOP_STEP = M4_LOOP_STEP.wrapping_add(1); }
+        return start_m4_model_turn();
+    }
+    if starts_with(tool, tool.len(), b"read_memory") {
+        trace_tool_call_with_arg(b"tool_call_requested", tool, b"id", arg1);
+        trace_tool_call_with_arg(b"tool_call_started", tool, b"id", arg1);
+        unsafe {
+            M4_LAST_TOOL_RESULT_LEN = memory::build_read_memory_json(arg1, &mut M4_LAST_TOOL_RESULT);
+        }
+        session::append_tool_result(tool, unsafe {
+            &M4_LAST_TOOL_RESULT[..M4_LAST_TOOL_RESULT_LEN]
+        });
+        trace_tool_call_completed(tool, b"ok");
+        unsafe { M4_LOOP_STEP = M4_LOOP_STEP.wrapping_add(1); }
+        return start_m4_model_turn();
+    }
     if starts_with(tool, tool.len(), b"read_session_state") {
         trace_tool_call_with_arg(b"tool_call_requested", tool, b"key", arg1);
         trace_tool_call_with_arg(b"tool_call_started", tool, b"key", arg1);
@@ -1401,6 +1594,23 @@ fn parse_m4_tool_from_response(
     tool: &[u8],
     tool_len: usize,
 ) -> Result<(&'static [u8], bool), &'static [u8]> {
+    if starts_with(tool, tool_len, b"memory_status") {
+        set_tool_call(tool, b"", b"");
+        return Ok((b"tool", false));
+    }
+    if starts_with(tool, tool_len, b"list_memory") {
+        let kind_len = unsafe { json_extract_string_local(response, b"kind", &mut M4_TOOL_ARG1) };
+        set_tool_call(tool, unsafe { &M4_TOOL_ARG1[..kind_len] }, b"");
+        return Ok((b"tool", false));
+    }
+    if starts_with(tool, tool_len, b"read_memory") {
+        let id_len = unsafe { json_extract_string_local(response, b"id", &mut M4_TOOL_ARG1) };
+        if id_len == 0 {
+            return Err(b"missing memory id");
+        }
+        set_tool_call(tool, unsafe { &M4_TOOL_ARG1[..id_len] }, b"");
+        return Ok((b"tool", false));
+    }
     if starts_with(tool, tool_len, b"fetch_url") {
         let url_len = unsafe { json_extract_string_local(response, b"url", &mut M4_TOOL_ARG1) };
         if url_len == 0 {

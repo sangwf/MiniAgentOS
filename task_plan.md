@@ -78,3 +78,55 @@ behavior.
 | Hide trace bootstrap from the terminal | completed | Kept background trace capture for live log viewing, but changed the launcher bootstrap so `trace on` and the bootstrap TRACE burst no longer leak into the interactive terminal |
 | Add context-engineering viewer modes | completed | Extended `tools/view_llm_log.py` with raw request/response, budget estimates, focus filtering, and per-turn diff views |
 | Fix plain-HTTP oversized request sends | completed | Added segmented `FETCH_HTTP` sending with per-request retry so large host-bridge POSTs no longer exceed the virtio TCP payload budget |
+
+## 2026-03-20 Follow-Up Goal (M7)
+
+Define Milestone 7 around durable memory and explicit context management so
+MiniAgentOS can sustain longer coding and research loops without relying on
+opaque prompt growth.
+
+### 2026-03-20 M7 Phases
+
+| Phase | Status | Notes |
+| --- | --- | --- |
+| Confirm the next milestone direction | completed | Reused the earlier conclusion that M7 should focus on memory/context rather than another isolated capability |
+| Write the formal M7 milestone doc | completed | Added `docs/milestones/m7.md` around durable memory, truthful compaction, inspectability, and resume |
+| Sync repository navigation | completed | Updated `README.md` and `AGENTS.md` to list `m7.md` and summarize M7 direction |
+| Write the M7 tool contract | completed | Added `docs/milestones/m7-tool-contract.md` with inspection-first memory surfaces, prompt-layer concepts, and bounded checkpoint/compaction semantics |
+| Write the M7 harness matrix | completed | Added `docs/milestones/m7-harness-matrix.md` with fixture/live case groups for memory inspection, compaction, follow-up reuse, and resume |
+| Write the M7 artifact contract | completed | Added `docs/milestones/m7-artifact-contract.md` to define stable memory/context/checkpoint artifacts for harness evaluation |
+| Write the M7 memory backend draft | completed | Added `docs/milestones/m7-memory-backend.md` to define guest RAM memory, context assembly, compaction, and host persistence roles |
+| Implement the first M7 fixture harness slice | completed | Added `harness/lib/m7_substrate.py`, wired M7 artifacts into `run_case.py` and `evaluator.py`, extended `fake_agent.py`, and landed a passing `m7` fixture suite |
+| Implement the first in-guest M7 runtime slice | completed | Added `runtime/src/agent/memory.rs`, wired memory lifecycle into session/history updates, extended prompt assembly with bounded memory sections, and exposed `memory-status`, `memory-list`, `memory-read` plus matching M4 tools |
+| Implement the first live M7 slice | completed | Added trace-backed memory/context artifact synthesis, `harness/config.runtime-m7.json`, `m7live-memory-inspection`, and passed `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json` |
+| Implement guest-side truthful compaction first slice | completed | Added automatic bounded source/workspace/execution/conversation compaction in `runtime/src/agent/memory.rs`, emitted `memory_compacted` trace, added `m7live-truthful-compaction`, and passed the full `m7live` suite |
+
+## M7 Current Assessment
+
+- M7 is no longer planned-only.
+- The first fixture-backed M7 harness slice is implemented and passing:
+  - `./bin/run-suite --suite m7 --config harness/config.fixture.json`
+- The harness now emits and evaluates:
+  - `memory_snapshot.json`
+  - `memory_events.json`
+  - `context_snapshot.json`
+  - `context_budget.json`
+  - `checkpoint_snapshot.json`
+- Existing fixture baselines still hold:
+  - `m6` passes
+  - `m5` passes
+  - `m4` remains at the two known failures:
+    - `m4-loop-context-bleed-repro`
+    - `m4-loop-openai-followup`
+- The first real runtime M7 slice now exists, but it is still inspection-first:
+  - guest memory lives in RAM only
+  - one retained slot per major memory class
+  - shell inspection commands work
+  - prompt assembly now includes `Working memory`, `Known sources`, and `Workspace memory`
+- The first live M7 harness slice is now implemented and passing:
+  - `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json`
+- The guest-side live runtime now has a first truthful-compaction slice for
+  large retained source/workspace/execution/conversation results.
+- M7 is still partial overall because checkpoint/resume are still fixture-only,
+  and the guest-side compaction policy is still a bounded first slice rather
+  than the final durable memory runtime.

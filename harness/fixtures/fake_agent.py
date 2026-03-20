@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from harness.lib.m5_substrate import M5Substrate
 from harness.lib.m6_substrate import M6Substrate
+from harness.lib.m7_substrate import M7Substrate
 
 
 WORKSPACE_ROOT = Path(os.environ["HARNESS_WORKSPACE_ROOT"]).resolve() if os.environ.get("HARNESS_WORKSPACE_ROOT") else None
@@ -31,6 +32,7 @@ SEARCH_FIXTURE_PATH = (
 SOURCE_BASE_URL = os.environ.get("HARNESS_SOURCE_BASE_URL")
 M5 = M5Substrate(WORKSPACE_ROOT, OUTPUT_DIR, DOCKER_IMAGE)
 M6 = M6Substrate(SEARCH_FIXTURE_PATH, SOURCE_BASE_URL, OUTPUT_DIR)
+M7 = M7Substrate(OUTPUT_DIR)
 
 
 def emit(event, **extra):
@@ -270,6 +272,410 @@ def _performance_line(records: list[dict]) -> str:
     return "No explicit performance claims were recorded in the known sources."
 
 
+def _m7_public_state(session_state: dict) -> dict:
+    data = {}
+    for key, value in session_state.items():
+        if not key.startswith("m7_"):
+            continue
+        if key == "m7_recent_lines":
+            continue
+        data[key] = value
+    return data
+
+
+def _m7_session_state_text(session_state: dict) -> str:
+    public_state = _m7_public_state(session_state)
+    if not public_state:
+        return ""
+    return json.dumps(public_state, ensure_ascii=False, sort_keys=True)
+
+
+def _m7_recent_conversation_text(session_state: dict) -> str:
+    lines = session_state.get("m7_recent_lines", [])
+    if not isinstance(lines, list):
+        return ""
+    rendered = [str(line) for line in lines[-6:]]
+    return "\n".join(rendered)
+
+
+def _m7_append_turn(session_state: dict, user_text: str, assistant_text: str) -> None:
+    lines = session_state.setdefault("m7_recent_lines", [])
+    if not isinstance(lines, list):
+        lines = []
+        session_state["m7_recent_lines"] = lines
+    lines.append(f"User: {user_text}")
+    lines.append(f"Assistant: {assistant_text}")
+    while len(lines) > 8:
+        del lines[0]
+
+
+def _m7_update_conversation_memory(session_state: dict, turn_index: int) -> None:
+    recent = _m7_recent_conversation_text(session_state)
+    if not recent:
+        return
+    M7.add_memory(
+        "conversation",
+        "Recent conversation tail retained for follow-up continuity.",
+        source="recent_conversation",
+        state="derived",
+        detail=recent,
+        turn_index=turn_index,
+        entry_id="mem-conversation",
+    )
+
+
+def _m7_record_context(
+    *,
+    session_state: dict,
+    turn_index: int,
+    current_request: str,
+    latest_tool_result: str = "",
+) -> None:
+    M7.record_context_snapshot(
+        turn_index=turn_index,
+        current_request=current_request,
+        latest_tool_result=latest_tool_result,
+        session_state=_m7_session_state_text(session_state),
+        recent_conversation=_m7_recent_conversation_text(session_state),
+        instructions_chars=1820,
+    )
+
+
+def _handle_m7_turn(prompt: str, text: str, session_state: dict, turn_index: int) -> str | None:
+    if not M7.available():
+        return None
+
+    lowered = text.lower().strip()
+
+    if "inspect memory" in lowered or "show memory" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        task_entry = M7.add_memory(
+            "task",
+            "User requested direct inspection of the current working memory.",
+            source="user_turn",
+            state="derived",
+            turn_index=turn_index,
+            entry_id="mem-task-inspect",
+        )
+        source_entry = M7.add_memory(
+            "source",
+            "MiniAgentOS M7 memory entries are explicit runtime-owned state.",
+            source="fixture:m7-memory",
+            state="raw",
+            detail="This retained source fact exists so memory inspection can show both task and source layers.",
+            turn_index=turn_index,
+            entry_id="mem-source-inspect",
+        )
+        session_state["m7_last_source_id"] = source_entry["entry"]["id"]
+        _m7_record_context(session_state=session_state, turn_index=turn_index, current_request=text)
+        status = M7.memory_status()
+        tool_call("memory_status", {}, status)
+        listing = M7.list_memory(limit=10)
+        tool_call("list_memory", {"limit": 10}, listing)
+        read_result = M7.read_memory(source_entry["entry"]["id"])
+        tool_call("read_memory", {"id": source_entry["entry"]["id"]}, read_result)
+        answer = "Memory inspection shows one task entry and one source entry retained."
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    if "report context budget" in lowered or "context budget by layer" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        M7.add_memory(
+            "task",
+            "User requested a report of prompt budget usage by layer.",
+            source="user_turn",
+            state="derived",
+            turn_index=turn_index,
+            entry_id="mem-task-budget",
+        )
+        M7.add_memory(
+            "execution",
+            "Latest tool result contained a medium-sized bounded execution summary.",
+            source="run_process:fixture-check",
+            state="raw",
+            detail="failure: add(2, 3) returned -1 instead of 5; traceback omitted for brevity; bounded execution summary retained.",
+            turn_index=turn_index,
+            entry_id="mem-exec-budget",
+        )
+        latest_tool_result = (
+            "tool_result: verification output repeated for budgeting. " * 20
+        ).strip()
+        _m7_record_context(
+            session_state=session_state,
+            turn_index=turn_index,
+            current_request=text,
+            latest_tool_result=latest_tool_result,
+        )
+        status = M7.memory_status()
+        tool_call("memory_status", {}, status)
+        answer = (
+            "Context budget recorded instructions, current request, latest tool result, working memory, known sources, workspace memory, session state, and recent conversation."
+        )
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    if "compact the large source memory" in lowered or "compact memory truthfully" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        source_entry = M7.add_memory(
+            "source",
+            "The retained fact is that Project Atlas is the codename mentioned in the long source.",
+            source="fetch_url:https://fixture.local/m7/atlas",
+            state="raw",
+            detail=(
+                "Project Atlas is the codename mentioned in the long source. "
+                + ("background filler " * 80)
+            ).strip(),
+            turn_index=turn_index,
+            entry_id="mem-source-compact",
+        )
+        _m7_record_context(
+            session_state=session_state,
+            turn_index=turn_index,
+            current_request=text,
+            latest_tool_result=source_entry["entry"]["detail"],
+        )
+        compact_result = M7.compact_memory([source_entry["entry"]["id"]], turn_index=turn_index)
+        tool_call(
+            "compact_memory",
+            {"ids": [source_entry["entry"]["id"]], "mode": "bounded_summary"},
+            compact_result,
+        )
+        read_result = M7.read_memory(source_entry["entry"]["id"])
+        tool_call("read_memory", {"id": source_entry["entry"]["id"]}, read_result)
+        answer = "Compacted memory still retains that Project Atlas is the codename, and the entry is now marked compacted."
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    if "remember that m6 uses brave search" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        M7.add_memory(
+            "task",
+            "User wants a remembered research fact about the M6 search provider.",
+            source="user_turn",
+            state="derived",
+            turn_index=turn_index,
+            entry_id="mem-task-research",
+        )
+        source_entry = M7.add_memory(
+            "source",
+            "M6 uses Brave Search as its bounded search provider.",
+            source="fetch_url:https://fixture.local/m6/provider",
+            state="raw",
+            detail="The fetched provider note says M6 uses Brave Search through BRAVE_API_KEY.",
+            turn_index=turn_index,
+            entry_id="mem-source-research",
+        )
+        session_state["m7_research_source_id"] = source_entry["entry"]["id"]
+        _m7_record_context(session_state=session_state, turn_index=turn_index, current_request=text)
+        listing = M7.list_memory(kind="source", limit=10)
+        tool_call("list_memory", {"kind": "source", "limit": 10}, listing)
+        answer = "Stored one research source stating that M6 uses Brave Search."
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    if "using remembered research only" in lowered or "what provider did m6 use" in lowered:
+        source_id = str(session_state.get("m7_research_source_id", ""))
+        if not source_id:
+            return None
+        emit("model_turn_completed", stop_reason="tool_call")
+        _m7_record_context(session_state=session_state, turn_index=turn_index, current_request=text)
+        read_result = M7.read_memory(source_id)
+        tool_call("read_memory", {"id": source_id}, read_result)
+        answer = "The remembered research source says M6 uses Brave Search."
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    if "remember the failing coding result" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        M7.add_memory(
+            "task",
+            "User wants the recent coding failure and its fix to remain available for follow-up.",
+            source="user_turn",
+            state="derived",
+            turn_index=turn_index,
+            entry_id="mem-task-coding",
+        )
+        workspace_entry = M7.add_memory(
+            "workspace",
+            "app.py defined add(a, b) and originally returned a - b.",
+            source="read_file:app.py",
+            state="derived",
+            detail="The bounded workspace note records the exact faulty line: return a - b",
+            turn_index=turn_index,
+            entry_id="mem-workspace-coding",
+        )
+        execution_entry = M7.add_memory(
+            "execution",
+            "check.py failed because add(2, 3) returned subtraction instead of addition.",
+            source="run_process:check.py",
+            state="raw",
+            detail="Observed failure: expected 5, got -1, then the bounded fix changed add to return a + b.",
+            turn_index=turn_index,
+            entry_id="mem-exec-coding",
+        )
+        session_state["m7_workspace_memory_id"] = workspace_entry["entry"]["id"]
+        session_state["m7_execution_memory_id"] = execution_entry["entry"]["id"]
+        _m7_record_context(session_state=session_state, turn_index=turn_index, current_request=text)
+        status = M7.memory_status()
+        tool_call("memory_status", {}, status)
+        answer = "Stored workspace and execution memory for the bounded coding failure."
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    if "what was the bug" in lowered or "why did add fail" in lowered:
+        execution_id = str(session_state.get("m7_execution_memory_id", ""))
+        workspace_id = str(session_state.get("m7_workspace_memory_id", ""))
+        if not execution_id:
+            return None
+        emit("model_turn_completed", stop_reason="tool_call")
+        _m7_record_context(session_state=session_state, turn_index=turn_index, current_request=text)
+        read_exec = M7.read_memory(execution_id)
+        tool_call("read_memory", {"id": execution_id}, read_exec)
+        if workspace_id:
+            read_workspace = M7.read_memory(workspace_id)
+            tool_call("read_memory", {"id": workspace_id}, read_workspace)
+        answer = "The bug was that add(a, b) returned a - b, so check.py saw subtraction instead of addition."
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    if "save a checkpoint after remembering the provider" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        M7.add_memory(
+            "task",
+            "User wants a checkpoint after retaining the provider fact.",
+            source="user_turn",
+            state="derived",
+            turn_index=turn_index,
+            entry_id="mem-task-checkpoint",
+        )
+        source_entry = M7.add_memory(
+            "source",
+            "The remembered provider fact is that M6 uses Brave Search.",
+            source="fetch_url:https://fixture.local/m6/provider",
+            state="raw",
+            detail="Checkpoint source fact: M6 uses Brave Search through BRAVE_API_KEY.",
+            turn_index=turn_index,
+            entry_id="mem-source-checkpoint",
+        )
+        session_state["m7_checkpoint_source_id"] = source_entry["entry"]["id"]
+        _m7_record_context(session_state=session_state, turn_index=turn_index, current_request=text)
+        save_result = M7.save_checkpoint("remembered-provider", turn_index=turn_index)
+        session_state["m7_checkpoint_id"] = save_result["checkpoint_id"]
+        tool_call("save_checkpoint", {"label": "remembered-provider"}, save_result)
+        answer = f"Saved checkpoint {save_result['checkpoint_id']} with the remembered provider fact."
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    if "resume from the saved checkpoint" in lowered:
+        checkpoint_id = str(session_state.get("m7_checkpoint_id", ""))
+        source_id = str(session_state.get("m7_checkpoint_source_id", ""))
+        if not checkpoint_id or not source_id:
+            return None
+        emit("model_turn_completed", stop_reason="tool_call")
+        M7.add_memory(
+            "conversation",
+            "Temporary unrelated memory before resume.",
+            source="user_turn",
+            state="derived",
+            turn_index=turn_index,
+            entry_id="mem-temp-before-resume",
+        )
+        resume_result = M7.resume_checkpoint(checkpoint_id, turn_index=turn_index)
+        tool_call("resume_checkpoint", {"checkpoint_id": checkpoint_id}, resume_result)
+        _m7_record_context(session_state=session_state, turn_index=turn_index, current_request=text)
+        read_result = M7.read_memory(source_id)
+        tool_call("read_memory", {"id": source_id}, read_result)
+        answer = "Resumed from the saved checkpoint and recovered that M6 uses Brave Search."
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    if "store a large tool result and keep only the key fact" in lowered:
+        emit("model_turn_completed", stop_reason="tool_call")
+        source_entry = M7.add_memory(
+            "source",
+            "The retained key fact is 42.",
+            source="tool_result:large-fixture",
+            state="raw",
+            detail=("Key fact: 42. " + ("large result filler " * 120)).strip(),
+            turn_index=turn_index,
+            entry_id="mem-source-large",
+        )
+        session_state["m7_large_source_id"] = source_entry["entry"]["id"]
+        _m7_record_context(
+            session_state=session_state,
+            turn_index=turn_index,
+            current_request=text,
+            latest_tool_result=source_entry["entry"]["detail"],
+        )
+        compact_result = M7.compact_memory([source_entry["entry"]["id"]], turn_index=turn_index)
+        tool_call(
+            "compact_memory",
+            {"ids": [source_entry["entry"]["id"]], "mode": "bounded_summary"},
+            compact_result,
+        )
+        answer = "Stored the large tool result as compacted memory while retaining the key fact."
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    if "what key fact did you retain" in lowered:
+        source_id = str(session_state.get("m7_large_source_id", ""))
+        if not source_id:
+            return None
+        emit("model_turn_completed", stop_reason="tool_call")
+        _m7_record_context(session_state=session_state, turn_index=turn_index, current_request=text)
+        read_result = M7.read_memory(source_id)
+        tool_call("read_memory", {"id": source_id}, read_result)
+        answer = "The retained key fact was 42."
+        _m7_append_turn(session_state, text, answer)
+        _m7_update_conversation_memory(session_state, turn_index)
+        emit("assistant_response_rendered")
+        emit("loop_stopped", stop_reason="final_response")
+        print_summary(prompt, [f"- {answer}"])
+        return "ok"
+
+    return None
+
+
 def _handle_m6_turn(prompt: str, text: str, session_state: dict, turn_index: int) -> str | None:
     if not M6.available():
         return None
@@ -503,6 +909,14 @@ def handle_text_turn(prompt: str, text: str, session_state: dict, turn_index: in
 
     emit("user_turn_received")
     emit("model_turn_started")
+
+    m7_status = _handle_m7_turn(prompt, text, session_state, turn_index)
+    if m7_status == "ok":
+        emit("goal_completed", status="ok")
+        return
+    if m7_status == "policy_denied":
+        emit("goal_refused", status="refused")
+        return
 
     m6_status = _handle_m6_turn(prompt, text, session_state, turn_index)
     if m6_status == "ok":

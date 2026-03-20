@@ -1,0 +1,74 @@
+{
+  "goal_id": "m7live-memory-inspection",
+  "goal": "Inspect the current retained working memory and bounded context budget through the real guest runtime.",
+  "input_mode": "text_line",
+  "input_payload": "Use memory_status to inspect the current retained memory counts and context budget, then briefly report what is retained right now.",
+  "requires_guest_openai": true,
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 90,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_completed"
+    ],
+    "session_transcript_required": true,
+    "expected_turn_count": 1,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status"
+    ],
+    "terminal_status": "ok",
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "memory_status"
+      }
+    ],
+    "max_tool_calls": 2,
+    "memory_snapshot_required": true,
+    "memory_entry_count": 2,
+    "expected_memory_entries": [
+      {
+        "kind": "task"
+      },
+      {
+        "kind": "conversation"
+      }
+    ],
+    "memory_events_required": true,
+    "context_snapshot_required": true,
+    "context_turn_count": 2,
+    "required_context_sections": [
+      "Current request",
+      "Latest tool result",
+      "Working memory",
+      "Known sources",
+      "Workspace memory",
+      "Session state",
+      "Recent conversation"
+    ],
+    "context_budget_required": true,
+    "context_budget_turn_count": 2,
+    "required_context_budget_fields": [
+      "instructions_chars",
+      "current_request_chars",
+      "latest_tool_result_chars",
+      "working_memory_chars",
+      "known_sources_chars",
+      "workspace_memory_chars",
+      "session_state_chars",
+      "recent_conversation_chars",
+      "estimated_total_tokens"
+    ]
+  }
+}

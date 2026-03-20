@@ -274,6 +274,121 @@ def _extract_tool_calls(trace_events: list[dict]) -> list[dict]:
     return extracted
 
 
+def _extract_memory_snapshot(trace_events: list[dict]) -> dict | None:
+    entries_by_id: dict[str, dict] = {}
+    ordered_ids: list[str] = []
+    for event in trace_events:
+        if not isinstance(event, dict) or event.get("event") != "memory_entry_snapshot":
+            continue
+        entry_id = str(event.get("id", "")).strip()
+        if not entry_id:
+            continue
+        entry = {
+            "id": entry_id,
+            "kind": event.get("kind"),
+            "summary": event.get("summary"),
+            "source": event.get("source"),
+            "state": event.get("state"),
+        }
+        for field in ("created_turn", "updated_turn", "chars", "estimated_tokens"):
+            if field in event:
+                entry[field] = event.get(field)
+        entries_by_id[entry_id] = entry
+        if entry_id not in ordered_ids:
+            ordered_ids.append(entry_id)
+    if not entries_by_id:
+        return None
+    return {"entries": [entries_by_id[entry_id] for entry_id in ordered_ids]}
+
+
+def _extract_memory_events(trace_events: list[dict]) -> dict | None:
+    events: list[dict] = []
+    for event in trace_events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("event") == "memory_event":
+            item = {
+                "turn_index": event.get("turn_index"),
+                "event": "memory_updated",
+                "entry_id": event.get("entry_id"),
+            }
+            for field in ("kind", "from_state", "to_state"):
+                if field in event:
+                    item[field] = event.get(field)
+            events.append(item)
+        elif event.get("event") == "memory_compacted":
+            item = {
+                "turn_index": event.get("turn_index"),
+                "event": "memory_compacted",
+                "entry_id": event.get("entry_id"),
+            }
+            for field in (
+                "kind",
+                "from_state",
+                "to_state",
+                "mode",
+                "source_chars",
+                "retained_chars",
+                "dropped_chars",
+            ):
+                if field in event:
+                    item[field] = event.get(field)
+            events.append(item)
+    if not events:
+        return None
+    return {"events": events}
+
+
+def _extract_context_snapshot(trace_events: list[dict]) -> dict | None:
+    order: list[int] = []
+    by_interaction: dict[int, dict] = {}
+    for event in trace_events:
+        if not isinstance(event, dict) or event.get("event") != "context_section_snapshot":
+            continue
+        interaction_id = int(event.get("interaction_id") or 0)
+        if interaction_id == 0:
+            interaction_id = len(order) + 1
+        if interaction_id not in by_interaction:
+            by_interaction[interaction_id] = {"turn_index": interaction_id, "sections": []}
+            order.append(interaction_id)
+        by_interaction[interaction_id]["sections"].append(
+            {
+                "name": event.get("name"),
+                "chars": event.get("chars"),
+            }
+        )
+    if not by_interaction:
+        return None
+    return {"turns": [by_interaction[interaction_id] for interaction_id in order]}
+
+
+def _extract_context_budget(trace_events: list[dict]) -> dict | None:
+    turns: list[dict] = []
+    turn_index = 0
+    for event in trace_events:
+        if not isinstance(event, dict) or event.get("event") != "context_budget_snapshot":
+            continue
+        turn_index += 1
+        item = {"turn_index": turn_index}
+        for field in (
+            "instructions_chars",
+            "current_request_chars",
+            "latest_tool_result_chars",
+            "working_memory_chars",
+            "known_sources_chars",
+            "workspace_memory_chars",
+            "session_state_chars",
+            "recent_conversation_chars",
+            "estimated_total_tokens",
+        ):
+            if field in event:
+                item[field] = event.get(field)
+        turns.append(item)
+    if not turns:
+        return None
+    return {"turns": turns}
+
+
 def _synthesize_fetched_sources(session_transcript: list[dict], search_results) -> dict | None:
     url_to_result_id: dict[str, str] = {}
     if isinstance(search_results, dict):
@@ -962,6 +1077,42 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
     source_memory_path = output_dir / "source_memory.json"
     if source_memory_path.exists():
         source_memory = _load_json(source_memory_path)
+    memory_snapshot = None
+    memory_snapshot_path = output_dir / "memory_snapshot.json"
+    if memory_snapshot_path.exists():
+        memory_snapshot = _load_json(memory_snapshot_path)
+    else:
+        memory_snapshot = _extract_memory_snapshot(trace_events)
+        if memory_snapshot is not None:
+            _write_json(memory_snapshot_path, memory_snapshot)
+    memory_events = None
+    memory_events_path = output_dir / "memory_events.json"
+    if memory_events_path.exists():
+        memory_events = _load_json(memory_events_path)
+    else:
+        memory_events = _extract_memory_events(trace_events)
+        if memory_events is not None:
+            _write_json(memory_events_path, memory_events)
+    context_snapshot = None
+    context_snapshot_path = output_dir / "context_snapshot.json"
+    if context_snapshot_path.exists():
+        context_snapshot = _load_json(context_snapshot_path)
+    else:
+        context_snapshot = _extract_context_snapshot(trace_events)
+        if context_snapshot is not None:
+            _write_json(context_snapshot_path, context_snapshot)
+    context_budget = None
+    context_budget_path = output_dir / "context_budget.json"
+    if context_budget_path.exists():
+        context_budget = _load_json(context_budget_path)
+    else:
+        context_budget = _extract_context_budget(trace_events)
+        if context_budget is not None:
+            _write_json(context_budget_path, context_budget)
+    checkpoint_snapshot = None
+    checkpoint_snapshot_path = output_dir / "checkpoint_snapshot.json"
+    if checkpoint_snapshot_path.exists():
+        checkpoint_snapshot = _load_json(checkpoint_snapshot_path)
 
     observations = {
         "sink_requests": len(sink_state.requests),
@@ -1000,6 +1151,11 @@ def run_case(case_path: Path, config_path: Path, output_dir: Path):
         search_results=search_results,
         fetched_sources=fetched_sources,
         source_memory=source_memory,
+        memory_snapshot=memory_snapshot,
+        memory_events=memory_events,
+        context_snapshot=context_snapshot,
+        context_budget=context_budget,
+        checkpoint_snapshot=checkpoint_snapshot,
     )
     _write_json(output_dir / "report.json", report)
     return 0 if report["pass"] else 1

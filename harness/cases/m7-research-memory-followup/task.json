@@ -1,0 +1,78 @@
+{
+  "goal_id": "m7-research-memory-followup",
+  "goal": "Retain a bounded research finding and answer a later follow-up from remembered source memory.",
+  "turns": [
+    {
+      "input_mode": "text_line",
+      "input_payload": "Remember that M6 uses Brave Search."
+    },
+    {
+      "input_mode": "text_line",
+      "input_payload": "Using remembered research only, what provider did M6 use?"
+    }
+  ],
+  "fixture": {
+    "source_asset": "source.md"
+  },
+  "expect": {
+    "boot_prompt": "Goal >",
+    "timeout_sec": 30,
+    "result_required": false,
+    "required_trace_events": [
+      "session_started",
+      "user_turn_received",
+      "model_turn_started",
+      "tool_call_requested",
+      "tool_call_completed",
+      "assistant_response_rendered",
+      "loop_stopped",
+      "goal_completed"
+    ],
+    "session_transcript_required": true,
+    "expected_turn_count": 2,
+    "terminal_result_required": true,
+    "terminal_fields": [
+      "status",
+      "summary"
+    ],
+    "terminal_status": "ok",
+    "terminal_summary_must_include": [
+      "Brave Search"
+    ],
+    "expected_tool_calls": [
+      {
+        "event": "tool_call_requested",
+        "tool": "list_memory"
+      },
+      {
+        "event": "tool_call_requested",
+        "tool": "read_memory"
+      }
+    ],
+    "max_tool_calls": 2,
+    "memory_snapshot_required": true,
+    "memory_entry_count": 3,
+    "expected_memory_entries": [
+      {
+        "kind": "task"
+      },
+      {
+        "id": "mem-source-research",
+        "kind": "source"
+      },
+      {
+        "kind": "conversation"
+      }
+    ],
+    "memory_events_required": true,
+    "context_snapshot_required": true,
+    "context_turn_count": 2,
+    "required_context_sections": [
+      "Current request",
+      "Known sources",
+      "Recent conversation"
+    ],
+    "context_budget_required": true,
+    "context_budget_turn_count": 2
+  }
+}

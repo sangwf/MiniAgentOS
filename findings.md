@@ -220,6 +220,93 @@
   then rewritten in place with the response once the matching
   `model_response_snapshot` arrives. The old `--follow` logic only watched row
   count, so it missed in-place row updates where the line count stayed the same.
+
+## 2026-03-20 M7 Runtime Slice
+
+- The current runtime prompt assembly in `runtime/src/agent/loop.rs` was still
+  a bounded prompt assembler, not an explicit memory runtime: it only had
+  `Current request`, `Latest tool result`, `Session state`, and
+  `Recent conversation`.
+- The right first in-guest M7 slice is additive and inspection-first, not a
+  full durable checkpoint system:
+  - keep working memory in guest RAM
+  - retain one bounded slot per memory class (`task`, `source`, `workspace`,
+    `execution`, `conversation`)
+  - expose memory through shell commands and sync M4 tools before attempting
+    live harness coverage
+- A new `runtime/src/agent/memory.rs` module is now in place and wired into
+  session lifecycle updates:
+  - `session_reset()` clears memory
+  - user turns update task memory
+  - tool results update source/workspace/execution memory
+  - assistant turns update conversation memory
+- The real guest prompt contract now includes three additional bounded sections:
+  - `Working memory`
+  - `Known sources`
+  - `Workspace memory`
+- The runtime also records first-pass context budget counters for those
+  sections, exposed through `memory_status`.
+- New in-guest shell inspection commands are now available:
+  - `memory-status`
+  - `memory-list [kind]`
+  - `memory-read <id>`
+- Matching sync M4 tools are also now callable by the model:
+  - `memory_status`
+  - `list_memory`
+  - `read_memory`
+- The first smoke test of the new runtime slice succeeded:
+  - `cd runtime && make build` passed
+  - `memory-status`, `memory-list`, and `memory-read mem-task` produced correct
+    JSON responses inside a real QEMU guest
+- Existing deterministic harness baselines still hold after the runtime wiring:
+  - `./bin/check` passed
+  - `./bin/run-suite --suite m7 --config harness/config.fixture.json` passed
+  - `./bin/run-suite --suite m6 --config harness/config.fixture.json` passed
+
+## 2026-03-20 M7 Definition
+
+- The most appropriate next milestone after M6 is not "more tools" but
+  explicit, durable, inspectable runtime memory.
+- M7 should formalize memory as a runtime-owned substrate, not leave it as a
+  side effect of concatenating `Latest tool result`, `Known sources`, and
+  `Recent conversation`.
+- The key M7 capability areas are:
+  - explicit memory classes
+  - truthful compaction
+  - context budgeting
+  - memory inspection
+  - durable resume
+- M7 should stay additive on top of M4/M5/M6 and should not require a large
+  new planner-visible tool family on day one.
+- The first M7 doc set can start with the main milestone definition only; tool
+  contract and harness matrix should come after the high-level direction is
+  accepted.
+- The first M7 tool contract should stay inspection-first:
+  - `list_memory`
+  - `read_memory`
+  - `memory_status`
+  with `compact_memory`, `save_checkpoint`, and `resume_checkpoint` as bounded
+  follow-on surfaces rather than the required minimum.
+- The first M7 harness bar should not accept "longer prompts" as success. It
+  should explicitly validate:
+  - memory inspection
+  - context budget visibility
+  - truthful compaction
+  - research follow-up reuse
+  - coding follow-up reuse
+  - resume continuity
+- The key storage decision for M7 is now explicit: working memory should live in
+  guest runtime memory first, while files should be used only for checkpoints
+  and host-visible artifacts.
+- The new M7 artifact contract requires the harness to reason about:
+  - retained memory entries
+  - memory mutations over time
+  - prompt assembly sections
+  - prompt-layer budgets
+  - checkpoint save/restore state
+- The new M7 backend draft keeps M7 additive by layering explicit working
+  memory on top of the existing session history and session-state mechanisms
+  instead of replacing them outright.
 - For context engineering, the most useful distinction is:
   - normalized view for fast reading
   - raw request/response payloads for truthful API inspection
@@ -247,3 +334,110 @@
   not exit quickly after `terminate()`, `tools/m5_run.py` could raise a second
   `TimeoutExpired` during `kill()`. The cleanup path now degrades to a warning
   instead of printing a Python traceback.
+- The first useful M7 implementation can stay fixture-side. A deterministic
+  memory substrate plus stable artifacts is already enough to validate explicit
+  memory retention, truthful compaction, context budgeting, follow-up reuse,
+  and checkpoint resume.
+- The M7 evaluator only needed five new artifact families to become useful:
+  - `memory_snapshot.json`
+  - `memory_events.json`
+  - `context_snapshot.json`
+  - `context_budget.json`
+  - `checkpoint_snapshot.json`
+- Existing harness structure was already sufficient for M7. No new fixture
+  servers or sink/source protocol changes were needed; the main work was:
+  - loading new output artifacts in `run_case.py`
+  - asserting them in `evaluator.py`
+  - emitting them deterministically from the fixture agent
+- The current M7 context split works cleanly when:
+  - `task`, `execution`, and `conversation` entries feed `Working memory`
+  - `source` entries feed `Known sources`
+  - `workspace` entries feed `Workspace memory`
+  This kept the artifact story and evaluator assertions straightforward.
+- The first passing M7 fixture suite is broad enough to validate all major
+  memory behaviors without live runtime support:
+  - memory inspection
+  - context budget reporting
+  - follow-up after a compacted large result
+  - truthful compaction inspection
+  - research-memory follow-up
+  - coding-memory follow-up
+  - checkpoint save/resume
+
+## 2026-03-20 M7 Live Slice
+
+- The first live M7 slice works best as an inspection path, not as a fake
+  long-task demo. The guest already has enough signal to expose truthful memory
+  state through `memory_status`, and the harness can reconstruct the first live
+  M7 artifacts from trace without inventing a new host bridge.
+- The guest runtime now emits enough M7-specific trace to synthesize live
+  artifacts:
+  - `memory_event`
+  - `memory_entry_snapshot`
+  - `context_budget_snapshot`
+  - per-section `context_section_snapshot`
+- `run_case.py` can now synthesize these live artifacts from trace when the
+  guest does not write them directly:
+  - `memory_snapshot.json`
+  - `memory_events.json`
+  - `context_snapshot.json`
+  - `context_budget.json`
+- The first live case, `m7live-memory-inspection`, needs two model turns, not
+  one:
+  - one turn to call `memory_status`
+  - one follow-up turn to summarize the observed counts/budget
+  The original harness failure was therefore expectation drift, not a runtime
+  bug.
+- After aligning the live case expectations with the real `model -> tool ->
+  model` loop, the first live M7 suite now passes:
+  - `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json`
+
+## 2026-03-20 M7 Guest Truthful Compaction
+
+- The first guest-side M7 runtime slice originally retained long tool results
+  too literally:
+  - `summary` was generic
+  - `detail` was just a bounded raw copy
+  - `state=compacted` was not meaningfully represented in live guest memory
+- The right first truthful-compaction shape in the guest is policy-driven and
+  additive:
+  - automatically compact long retained results instead of exposing a new free
+    write path
+  - keep compaction explicit and inspectable
+  - preserve a bounded excerpt plus an explicit statement that the full raw
+    content was not carried forward
+- The guest runtime now performs automatic compaction for large retained:
+  - source results
+  - workspace results
+  - execution results
+  - assistant responses
+- `search_web`, `fetch_url`, and `read_process_output` now get dedicated
+  compaction summaries instead of a generic truncation story:
+  - search results retain top-result metadata and omit the raw JSON body
+  - fetched sources retain an excerpt and explicitly note that the full page
+    body was not carried forward
+  - process outputs retain exit code plus stdout/stderr previews and explicitly
+    note that the full raw process output was not carried forward
+- The guest trace now emits `memory_compacted` with:
+  - `entry_id`
+  - `kind`
+  - `mode`
+  - `source_chars`
+  - `retained_chars`
+  - `dropped_chars`
+- `run_case.py` now preserves those live compaction events inside
+  `memory_events.json`, which makes live truthful-compaction assertions
+  possible.
+- A new live case,
+  `harness/cases/m7live-truthful-compaction/`,
+  proves the first guest compaction slice against a real QEMU guest:
+  - fetch a long source fixture
+  - inspect `mem-source`
+  - verify the retained source memory is `state=compacted`
+  - verify the key fact `ORBIT-42` survives compaction truthfully
+- Validation after this change:
+  - `cd runtime && make build` passed
+  - `./bin/run-suite --suite m7 --config harness/config.fixture.json` passed
+  - `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json`
+    passed
+  - `./bin/check` passed

@@ -121,11 +121,13 @@ pub(super) fn session_reset() {
             slot += 1;
         }
     }
+    memory::memory_reset();
     trace_event(b"session_started", 0);
 }
 
 pub(super) fn append_user_turn(text: &[u8]) {
     ensure_session_started();
+    memory::note_user_request(text);
     history_append_bytes(b"User: ");
     history_append_bytes(text);
     history_append_bytes(b"\n");
@@ -133,6 +135,7 @@ pub(super) fn append_user_turn(text: &[u8]) {
 
 pub(super) fn append_tool_result(tool: &[u8], result: &[u8]) {
     ensure_session_started();
+    memory::note_tool_result(tool, result);
     history_append_bytes(b"Tool[");
     history_append_bytes(tool);
     history_append_bytes(b"]: ");
@@ -142,6 +145,7 @@ pub(super) fn append_tool_result(tool: &[u8], result: &[u8]) {
 
 pub(super) fn append_assistant_turn(text: &[u8]) {
     ensure_session_started();
+    memory::note_assistant_response(text);
     history_append_bytes(b"Assistant: ");
     history_append_bytes(text);
     history_append_bytes(b"\n");

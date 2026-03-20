@@ -17,6 +17,9 @@ Current implementation status:
 - `M5`: implemented in its first bounded form
 - `M6`: partially implemented as bounded web search and research, with fixture
   and first live harness slices
+- `M7`: partially implemented as durable memory/context behavior, with a first
+  fixture-backed suite, first live inspection/compaction slices, and first
+  in-guest memory inspection/compaction slices
 
 Milestone 0 is `Boot to Live Agent`:
 
@@ -139,6 +142,7 @@ The formal milestone specs live in:
 - `docs/milestones/m4.md`
 - `docs/milestones/m5.md`
 - `docs/milestones/m6.md`
+- `docs/milestones/m7.md`
 
 The fixture agent proves the harness works; it does not count as milestone
 completion for the real runtime.
@@ -153,6 +157,7 @@ completion for the real runtime.
 - `docs/milestones/m4.md`: the M4 spec
 - `docs/milestones/m5.md`: the M5 spec
 - `docs/milestones/m6.md`: the M6 spec
+- `docs/milestones/m7.md`: the M7 spec
 - `docs/schemas/`: task, trace, and intent artifact schema references
 - `harness/`: host-side harness, cases, configs, and fixture services
 - `runtime/`: the real MiniOS runtime being adapted to the M0 harness contract
@@ -265,6 +270,18 @@ Run the first live-runtime M6 suite:
 
 ```sh
 ./bin/run-suite --suite m6live --config harness/config.runtime-m6.json
+```
+
+Run the fixture-backed M7 suite:
+
+```sh
+./bin/run-suite --suite m7 --config harness/config.fixture.json
+```
+
+Run the first live-runtime M7 suite:
+
+```sh
+./bin/run-suite --suite m7live --config harness/config.runtime-m7.json
 ```
 
 Run the live OpenAI-backed M4 summarize flow:

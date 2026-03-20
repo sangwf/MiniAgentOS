@@ -1,6 +1,7 @@
 use super::*;
 
 mod goal;
+mod memory;
 mod r#loop;
 mod model;
 mod policy;

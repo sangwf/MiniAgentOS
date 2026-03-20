@@ -46,6 +46,14 @@ For M6-style cases, the harness may also preserve:
 - `fetched_sources.json`
 - `source_memory.json`
 
+For M7-style cases, the harness may also preserve:
+
+- `memory_snapshot.json`
+- `memory_events.json`
+- `context_snapshot.json`
+- `context_budget.json`
+- `checkpoint_snapshot.json`
+
 For M3-style cases, the primary success path may return directly to UART instead
 of posting to a sink, so the harness now preserves both sink-side and
 terminal-side result artifacts. The harness can also validate compiled intent
@@ -127,6 +135,36 @@ The first M6 slices validate:
 - separation of search snippets from fetched evidence
 - bounded follow-up reuse via source memory
 - a real-runtime Brave-backed search -> fetch -> answer path
+
+## M7 harness surface
+
+The harness now also supports the first bounded memory/context cases:
+
+- fixture-backed `m7` suite for explicit memory inspection, truthful
+  compaction, follow-up reuse, and checkpoint resume validation
+- first live `m7live` slices for real guest-side memory inspection and
+  truthful compaction through QEMU and a live OpenAI path
+
+Run the fixture-backed M7 suite with:
+
+```sh
+./bin/run-suite --suite m7 --config harness/config.fixture.json
+```
+
+Run the first live-runtime M7 suite with:
+
+```sh
+./bin/run-suite --suite m7live --config harness/config.runtime-m7.json
+```
+
+The first M7 slices validate:
+
+- `memory_snapshot.json` and `memory_events.json`
+- prompt-layer `context_snapshot.json` and `context_budget.json`
+- research and coding follow-up reuse from retained memory
+- checkpoint save/resume continuity
+- real guest-side `memory_status` inspection through one live QEMU turn
+- real guest-side truthful source compaction after a long fetch result
 
 ## Toolchain paths
 

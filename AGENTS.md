@@ -15,6 +15,7 @@ purpose operating system. The harness is a first-class part of the system.
 - `docs/milestones/m4.md`: current Milestone 4 definition
 - `docs/milestones/m5.md`: current Milestone 5 definition
 - `docs/milestones/m6.md`: current Milestone 6 definition
+- `docs/milestones/m7.md`: current Milestone 7 definition
 - `docs/schemas/task.schema.json`: task file reference schema
 - `docs/schemas/trace-event.schema.json`: trace event reference schema
 - `docs/schemas/intent-ir.schema.json`: intent artifact reference schema
@@ -52,6 +53,9 @@ purpose operating system. The harness is a first-class part of the system.
 - `./bin/run-suite --suite m5 --config <config>`: run the M5 fixture suite
 - `./bin/run-suite --suite m5live --config <config>`: run the QEMU-backed live M5 suite
 - `./bin/run-suite --suite m6 --config <config>`: run the M6 fixture suite
+- `./bin/run-suite --suite m6live --config <config>`: run the QEMU-backed live M6 suite
+- `./bin/run-suite --suite m7 --config <config>`: run the M7 fixture suite
+- `./bin/run-suite --suite m7live --config <config>`: run the QEMU-backed live M7 suite
 - `./bin/validate`: run the default M0 case against the fixture agent
 
 ## Harness Rules
@@ -176,3 +180,23 @@ is still incomplete.
 - Use `BRAVE_API_KEY` as the default live search backend secret.
 - Validate search, source selection, multi-source synthesis, and research
   follow-up behavior in the harness.
+
+## M7 Direction
+
+Status: partially implemented. M7 now has a first fixture-backed memory suite,
+first QEMU-backed live inspection and truthful-compaction slices, artifact
+contract, evaluator surface, and first in-guest memory inspection and
+truthful-compaction slices; the broader guest-side explicit memory runtime is
+still ahead.
+
+- Make memory and context a first-class runtime substrate instead of a side
+  effect of concatenating prior turns.
+- Introduce explicit working-memory classes for task, source, workspace, and
+  execution state.
+- Add truthful context compaction so large tool results and long histories do
+  not dominate later turns.
+- Add inspectable memory state so the user and harness can see what the runtime
+  currently remembers and why.
+- Add durable resume behavior for interrupted long-running coding and research
+  tasks.
+- Validate memory truthfulness, compaction, and resume behavior in the harness.

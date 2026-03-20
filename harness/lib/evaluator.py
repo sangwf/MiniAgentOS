@@ -61,6 +61,27 @@ def _workspace_file_content(snapshot, path):
     return entry.get("content")
 
 
+def _artifact_items(payload, key):
+    if not isinstance(payload, dict):
+        return []
+    value = payload.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _context_section_names(context_snapshot):
+    names: set[str] = set()
+    for turn in _artifact_items(context_snapshot, "turns"):
+        if not isinstance(turn, dict):
+            continue
+        for section in turn.get("sections", []):
+            if not isinstance(section, dict):
+                continue
+            name = section.get("name")
+            if isinstance(name, str) and name:
+                names.add(name)
+    return names
+
+
 def evaluate_case(
     case_data,
     trace_events,
@@ -79,6 +100,11 @@ def evaluate_case(
     search_results=None,
     fetched_sources=None,
     source_memory=None,
+    memory_snapshot=None,
+    memory_events=None,
+    context_snapshot=None,
+    context_budget=None,
+    checkpoint_snapshot=None,
 ):
     expect = case_data["expect"]
     failures = []
@@ -90,6 +116,11 @@ def evaluate_case(
     search_results = search_results or {}
     fetched_sources = fetched_sources or {}
     source_memory = source_memory or {}
+    memory_snapshot = memory_snapshot or {}
+    memory_events = memory_events or {}
+    context_snapshot = context_snapshot or {}
+    context_budget = context_budget or {}
+    checkpoint_snapshot = checkpoint_snapshot or {}
 
     guest_exception = observations.get("guest_exception")
     if guest_exception:
@@ -342,6 +373,85 @@ def evaluate_case(
     ):
         failures.append("source memory did not include the expected ordered subset")
 
+    memory_entries = _artifact_items(memory_snapshot, "entries")
+    if expect.get("memory_snapshot_required") and not memory_entries:
+        failures.append("memory_snapshot artifact was not captured")
+    expected_memory_entry_count = expect.get("memory_entry_count")
+    if expected_memory_entry_count is not None and len(memory_entries) != expected_memory_entry_count:
+        failures.append(
+            f"unexpected memory entry count: {len(memory_entries)} != {expected_memory_entry_count}"
+        )
+    expected_memory_entries = expect.get("expected_memory_entries", [])
+    if expected_memory_entries and not _contains_expected_event_subset(
+        memory_entries, expected_memory_entries
+    ):
+        failures.append("memory snapshot did not include the expected ordered subset")
+
+    memory_event_items = _artifact_items(memory_events, "events")
+    if expect.get("memory_events_required") and not memory_event_items:
+        failures.append("memory_events artifact was not captured")
+    expected_memory_event_count = expect.get("memory_event_count")
+    if expected_memory_event_count is not None and len(memory_event_items) != expected_memory_event_count:
+        failures.append(
+            f"unexpected memory event count: {len(memory_event_items)} != {expected_memory_event_count}"
+        )
+    expected_memory_events = expect.get("expected_memory_events", [])
+    if expected_memory_events and not _contains_expected_event_subset(
+        memory_event_items, expected_memory_events
+    ):
+        failures.append("memory events did not include the expected ordered subset")
+
+    context_turns = _artifact_items(context_snapshot, "turns")
+    if expect.get("context_snapshot_required") and not context_turns:
+        failures.append("context_snapshot artifact was not captured")
+    expected_context_turn_count = expect.get("context_turn_count")
+    if expected_context_turn_count is not None and len(context_turns) != expected_context_turn_count:
+        failures.append(
+            f"unexpected context turn count: {len(context_turns)} != {expected_context_turn_count}"
+        )
+    required_context_sections = expect.get("required_context_sections", [])
+    if required_context_sections:
+        seen_names = _context_section_names(context_snapshot)
+        for section_name in required_context_sections:
+            if section_name not in seen_names:
+                failures.append(
+                    f"context snapshot is missing required section: {section_name}"
+                )
+
+    budget_turns = _artifact_items(context_budget, "turns")
+    if expect.get("context_budget_required") and not budget_turns:
+        failures.append("context_budget artifact was not captured")
+    expected_budget_turn_count = expect.get("context_budget_turn_count")
+    if expected_budget_turn_count is not None and len(budget_turns) != expected_budget_turn_count:
+        failures.append(
+            f"unexpected context budget turn count: {len(budget_turns)} != {expected_budget_turn_count}"
+        )
+    required_context_budget_fields = expect.get("required_context_budget_fields", [])
+    if required_context_budget_fields:
+        if not budget_turns:
+            failures.append("context_budget artifact was not captured")
+        else:
+            latest_budget = budget_turns[-1]
+            for field in required_context_budget_fields:
+                if field not in latest_budget:
+                    failures.append(
+                        f"context budget is missing required field: {field}"
+                    )
+
+    checkpoints = _artifact_items(checkpoint_snapshot, "checkpoints")
+    if expect.get("checkpoint_required") and not checkpoints:
+        failures.append("checkpoint_snapshot artifact was not captured")
+    expected_checkpoint_count = expect.get("checkpoint_count")
+    if expected_checkpoint_count is not None and len(checkpoints) != expected_checkpoint_count:
+        failures.append(
+            f"unexpected checkpoint count: {len(checkpoints)} != {expected_checkpoint_count}"
+        )
+    expected_checkpoints = expect.get("expected_checkpoints", [])
+    if expected_checkpoints and not _contains_expected_event_subset(
+        checkpoints, expected_checkpoints
+    ):
+        failures.append("checkpoint snapshot did not include the expected ordered subset")
+
     return {
         "pass": not failures,
         "failures": failures,
@@ -358,4 +468,9 @@ def evaluate_case(
         "search_results": search_results,
         "fetched_sources": fetched_sources,
         "source_memory": source_memory,
+        "memory_snapshot": memory_snapshot,
+        "memory_events": memory_events,
+        "context_snapshot": context_snapshot,
+        "context_budget": context_budget,
+        "checkpoint_snapshot": checkpoint_snapshot,
     }

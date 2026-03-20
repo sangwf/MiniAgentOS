@@ -238,6 +238,21 @@
   - `--raw` for full request/response payload inspection
   - `--budget` for chars and rough token estimates
   - `--diff` for request/response diffs against the previous turn
+- Defined Milestone 7 in `docs/milestones/m7.md` as a durable memory and
+  context runtime milestone.
+- Updated `README.md` and `AGENTS.md` so repository navigation now includes the
+  M7 milestone document and a short M7 direction summary.
+- Added `docs/milestones/m7-tool-contract.md` to define the first bounded M7
+  memory surface, shared concepts, and optional checkpoint/compaction flows.
+- Added `docs/milestones/m7-harness-matrix.md` to define the first fixture/live
+  acceptance matrix for memory inspection, truthful compaction, follow-up
+  reuse, and resume.
+- Added `docs/milestones/m7-artifact-contract.md` to define the stable M7
+  artifact set for memory snapshots, memory events, context snapshots, context
+  budgets, and checkpoint inspection.
+- Added `docs/milestones/m7-memory-backend.md` to define the first implementable
+  backend split between guest working memory, guest context assembly, and
+  host-side checkpoint/artifact persistence.
   - `--focus all|request|response|system|input|output` to isolate one slice
 - Adjusted the default rendering so:
   - `OUTPUT` shows semantic content instead of the full compact JSON wrapper
@@ -290,3 +305,167 @@
   a Python traceback on `Ctrl-C`.
 - Revalidated the launcher helper with:
   - `python3 -m py_compile tools/m5_run.py tools/agent_run.py`
+- Added `harness/lib/m7_substrate.py` as the first deterministic M7 fixture
+  backend. It keeps working memory in RAM and emits:
+  - `memory_snapshot.json`
+  - `memory_events.json`
+  - `context_snapshot.json`
+  - `context_budget.json`
+  - `checkpoint_snapshot.json` when checkpoints exist
+- Extended `harness/lib/run_case.py` to load the new M7 artifacts and pass them
+  into the evaluator.
+- Extended `harness/lib/evaluator.py` with M7 assertions for:
+  - retained memory entries
+  - memory mutation events
+  - context section visibility
+  - context budget fields
+  - checkpoint presence and metadata
+- Extended `harness/lib/run_suite.py` so `--suite m7` is supported.
+- Extended `harness/fixtures/fake_agent.py` with deterministic M7 turn
+  behaviors for:
+  - memory inspection
+  - context budget reporting
+  - truthful compaction
+  - follow-up after a large retained result
+  - research-memory follow-up
+  - coding-memory follow-up
+  - checkpoint save/resume
+- Added the first M7 fixture cases:
+  - `m7-memory-inspection`
+  - `m7-context-budget-report`
+  - `m7-followup-after-large-tool-result`
+  - `m7-truthful-compaction`
+  - `m7-research-memory-followup`
+  - `m7-coding-memory-followup`
+  - `m7-resume-interrupted-task`
+- Updated milestone and harness docs to reflect that M7 now has a first
+  fixture-backed implementation slice:
+  - `docs/milestones/m7.md`
+  - `README.md`
+  - `AGENTS.md`
+  - `harness/README.md`
+- Revalidated with:
+  - `python3 -m py_compile harness/fixtures/fake_agent.py harness/lib/m7_substrate.py harness/lib/run_case.py harness/lib/evaluator.py harness/lib/run_suite.py`
+  - `./bin/check`
+  - `./bin/run-suite --suite m7 --config harness/config.fixture.json`
+  - `./bin/run-suite --suite m6 --config harness/config.fixture.json`
+  - `./bin/run-suite --suite m5 --config harness/config.fixture.json`
+  - `./bin/run-suite --suite m4 --config harness/config.fixture.json`
+- Confirmed no new fixture regressions:
+  - `m7` passes
+  - `m6` passes
+  - `m5` passes
+  - `m4` still only fails:
+    - `m4-loop-context-bleed-repro`
+    - `m4-loop-openai-followup`
+
+## 2026-03-20 M7 Runtime Slice
+
+- Read the existing M7 docs, fixture substrate, and current runtime
+  session/prompt assembly code to find bounded hook points for a first in-guest
+  memory implementation.
+- Added `/Users/sangwf/code/MiniAgentOS/runtime/src/agent/memory.rs` as the
+  first guest-side M7 memory module.
+- Kept the first runtime slice intentionally narrow:
+  - one retained slot per memory class
+  - guest RAM only
+  - inspection-first surfaces
+- Wired the new memory module into:
+  - `/Users/sangwf/code/MiniAgentOS/runtime/src/agent/mod.rs`
+  - `/Users/sangwf/code/MiniAgentOS/runtime/src/agent/session.rs`
+  - `/Users/sangwf/code/MiniAgentOS/runtime/src/agent/loop.rs`
+- Session lifecycle is now memory-aware:
+  - session reset clears memory
+  - user turns retain task memory
+  - tool results retain source/workspace/execution memory
+  - assistant turns retain conversation memory
+- Extended the guest prompt contract with new bounded sections:
+  - `Working memory`
+  - `Known sources`
+  - `Workspace memory`
+- Added first-pass context budget capture for those sections via
+  `memory::record_context_budget(...)`.
+- Extended the guest tool surface with three sync M7 tools:
+  - `memory_status`
+  - `list_memory`
+  - `read_memory`
+- Added matching shell commands:
+  - `memory-status`
+  - `memory-list [kind]`
+  - `memory-read <id>`
+- Rebuilt successfully with:
+  - `cd /Users/sangwf/code/MiniAgentOS/runtime && make build`
+- Re-ran:
+  - `./bin/check`
+  - `./bin/run-suite --suite m7 --config harness/config.fixture.json`
+  - `./bin/run-suite --suite m6 --config harness/config.fixture.json`
+- Smoke-tested the new guest shell memory commands in QEMU:
+  - `memory-status` returned counts and budget JSON
+  - `memory-list` returned an empty retained set on a fresh session
+  - `memory-read mem-task` returned `unknown_memory_id` before any retained
+    task memory existed
+
+## 2026-03-20 M7 Live Slice
+
+- Extended the guest runtime trace to emit live M7 memory/context signals:
+  - `memory_event`
+  - `memory_entry_snapshot`
+  - `context_budget_snapshot`
+  - per-section `context_section_snapshot`
+- Extended `/Users/sangwf/code/MiniAgentOS/harness/lib/run_case.py` to
+  synthesize live M7 artifacts from trace when the guest run does not emit them
+  directly.
+- Added `/Users/sangwf/code/MiniAgentOS/harness/config.runtime-m7.json`.
+- Added the first live case:
+  - `/Users/sangwf/code/MiniAgentOS/harness/cases/m7live-memory-inspection/task.json`
+  - `/Users/sangwf/code/MiniAgentOS/harness/cases/m7live-memory-inspection/source.md`
+- First `m7live` run failed only on harness expectations:
+  - the case expected one context snapshot turn and one context-budget turn
+  - the real guest loop correctly produced two turns (`memory_status` tool turn
+    plus final answer turn)
+- Updated the live case to expect two context snapshots and two context-budget
+  snapshots.
+- Re-ran:
+  - `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json`
+  - `./bin/run-suite --suite m7 --config harness/config.fixture.json`
+  - `./bin/check`
+- Validation status after the fix:
+  - `m7live` passed
+  - `m7` passed
+  - `check` passed
+
+## 2026-03-20 M7 Guest Truthful Compaction
+
+- Extended `/Users/sangwf/code/MiniAgentOS/runtime/src/agent/memory.rs` with a
+  first automatic guest-side truthful-compaction policy for retained:
+  - source results
+  - workspace results
+  - execution results
+  - assistant responses
+- Added dedicated compacted-summary builders for:
+  - `search_web`
+  - `fetch_url`
+  - `read_process_output`
+  plus a generic bounded excerpt path for workspace/tool output.
+- Added `memory_compacted` trace emission with retained vs dropped size
+  metadata.
+- Extended `/Users/sangwf/code/MiniAgentOS/harness/lib/run_case.py` so
+  trace-derived `memory_events.json` keeps `memory_compacted` events in live
+  runs.
+- Added a new live case:
+  - `/Users/sangwf/code/MiniAgentOS/harness/cases/m7live-truthful-compaction/task.json`
+  - `/Users/sangwf/code/MiniAgentOS/harness/cases/m7live-truthful-compaction/source.md`
+- Verified the new live compaction case directly:
+  - `./bin/run-case harness/cases/m7live-truthful-compaction/task.json --config harness/config.runtime-m7.json --output output/m7live-compaction-retest`
+  - result: pass
+- Re-ran full validation:
+  - `cd /Users/sangwf/code/MiniAgentOS/runtime && make build`
+  - `./bin/run-suite --suite m7 --config harness/config.fixture.json`
+  - `./bin/run-suite --suite m7live --config harness/config.runtime-m7.json`
+  - `./bin/check`
+- Validation status after the compaction slice:
+  - `m7` passed
+  - `m7live` passed with:
+    - `m7live-memory-inspection`
+    - `m7live-truthful-compaction`
+  - `check` passed
